@@ -1,0 +1,73 @@
+module server;
+
+use aio.tcp;
+use aio.tls;
+use collections;
+use net.url;
+use strings;
+use std;
+
+class ReverseProxy {
+    func init(self: server.ReverseProxy) -> Void {
+    }
+
+    func target_url(self: server.ReverseProxy, base: String, path: String) -> String {
+        if len(base) == 0 {
+            return "";
+        }
+        if substr(base, len(base) - 1, 1) == "/" && len(path) > 0 && substr(path, 0, 1) == "/" {
+            return base + substr(path, 1, len(path) - 1);
+        }
+        return base + path;
+    }
+
+    func rewrite_request(self: server.ReverseProxy, req: server.HttpRequest, upstream_path: String) -> String {
+        let out_req = req.raw;
+        let first_end = strings.find_substr(req.raw, "\r\n");
+        let method_end = strings.find_substr(req.raw, " ");
+        if first_end > 0 && method_end > 0 {
+            let method = substr(req.raw, 0, method_end);
+            let rest = substr(req.raw, first_end, len(req.raw) - first_end);
+            out_req = method + " " + upstream_path + " HTTP/1.1" + rest;
+        }
+        return out_req;
+    }
+
+    async func request(self: server.ReverseProxy, cfg: collections.Map<String, String>, req: server.HttpRequest, proxy_pass: String, path: String, keep_alive: Bool) -> String {
+        let util = new server.ServerUtil();
+        let factory = new server.HttpResponseFactory();
+        let u, u_err = net.url.parse(self.target_url(proxy_pass, path));
+        if u_err != OK {
+            return factory.response_conn(502, "text/plain", "Bad proxy_pass", keep_alive);
+        }
+        let is_tls = u.scheme == "https";
+        let out_req = self.rewrite_request(req, u.path);
+        let timeout_ms = util.cfg_int(cfg, "proxy_timeout_ms", DEFAULT_PROXY_TIMEOUT_MS);
+        let max_bytes = util.cfg_int(cfg, "max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES);
+        let fd = 0;
+        let err = OK;
+        if is_tls {
+            let tls_fd, tls_err = await aio.tls.connect(u.host, u.port, timeout_ms);
+            fd = tls_fd;
+            err = tls_err;
+        } else {
+            let tcp_fd, tcp_err = await aio.tcp.connect(u.host, u.port, timeout_ms);
+            fd = tcp_fd;
+            err = tcp_err;
+        }
+        if err != OK {
+            return factory.response_conn(502, "text/plain", "Bad Gateway", keep_alive);
+        }
+        if fd <= 0 {
+            return factory.response_conn(502, "text/plain", "Bad Gateway", keep_alive);
+        }
+        let transport = new server.HttpTransport(fd, is_tls, timeout_ms);
+        _ = await transport.send_all(out_req);
+        let resp = await transport.recv_all(max_bytes);
+        _ = transport.close();
+        if len(resp) == 0 {
+            return factory.response_conn(502, "text/plain", "Bad Gateway", keep_alive);
+        }
+        return resp;
+    }
+}

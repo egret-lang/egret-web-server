@@ -1,0 +1,5 @@
+use server;
+
+async func main(argc: Int, argv: Int) -> Int {
+    return await (new server.WebServerCli()).run(argc, argv);
+}

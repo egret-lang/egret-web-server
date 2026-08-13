@@ -1,0 +1,249 @@
+module server;
+
+use collections;
+use strconv;
+use strings;
+use std;
+
+internal const DEFAULT_WORKER_PROCESSES_TEXT: String = "1";
+internal const DEFAULT_WORKER_CONNECTIONS_TEXT: String = "1024";
+internal const DEFAULT_WORKER_CONNECTIONS: Int = 1024;
+internal const DEFAULT_LISTEN_HOST: String = "0.0.0.0";
+internal const DEFAULT_LISTEN_PORT_TEXT: String = "80";
+internal const DEFAULT_LISTEN_PORT: Int = 80;
+internal const DEFAULT_BACKLOG_TEXT: String = "512";
+internal const DEFAULT_BACKLOG: Int = 512;
+internal const DEFAULT_SERVER_NAME: String = "_";
+internal const DEFAULT_SERVER_NAMES: String = "|_|";
+internal const DEFAULT_ROOT: String = "./www";
+internal const DEFAULT_INDEX: String = "index.html";
+internal const DEFAULT_CLIENT_MAX_BODY_SIZE_TEXT: String = "1048576";
+internal const DEFAULT_CLIENT_MAX_BODY_SIZE: Int = 1048576;
+internal const DEFAULT_KEEPALIVE_TIMEOUT_MS_TEXT: String = "5000";
+internal const DEFAULT_KEEPALIVE_TIMEOUT_MS: Int = 5000;
+internal const DEFAULT_PROXY_TIMEOUT_MS_TEXT: String = "15000";
+internal const DEFAULT_PROXY_TIMEOUT_MS: Int = 15000;
+internal const DEFAULT_MAX_RESPONSE_BYTES_TEXT: String = "16777216";
+internal const DEFAULT_MAX_RESPONSE_BYTES: Int = 16777216;
+internal const DEFAULT_GZIP: String = "off";
+internal const DISABLED_TEXT: String = "off";
+internal const DEFAULT_GZIP_MIN_LENGTH_TEXT: String = "1024";
+internal const DEFAULT_GZIP_MIN_LENGTH: Int = 1024;
+internal const DEFAULT_HTTPS_ENABLED: String = "0";
+internal const DEFAULT_HTTPS_REDIRECT: String = "on";
+internal const DEFAULT_FASTCGI_INDEX: String = "index.php";
+internal const DEFAULT_FASTCGI_PORT: Int = 9000;
+internal const DEFAULT_ACCEPT_TIMEOUT_MS: Int = 1000;
+internal const DEFAULT_KEEPALIVE_REQUEST_LIMIT: Int = 1000;
+internal const DEFAULT_GC_MAX_ADAPTIVE_THRESHOLD_BYTES: Int = 67108864;
+
+class ServerUtil {
+    func init(self: server.ServerUtil) -> Void {
+    }
+
+    func atoi_or(self: server.ServerUtil, s: String, def: Int) -> Int {
+        if len(s) == 0 {
+            return def;
+        }
+        let n = strconv.atoi(s);
+        if n == 0 && s != "0" {
+            return def;
+        }
+        return n;
+    }
+
+    func itoa(self: server.ServerUtil, n: Int) -> String {
+        return strconv.itoa(n);
+    }
+
+    func cfg_get(self: server.ServerUtil, cfg: collections.Map<String, String>, key: String, def: String) -> String {
+        if cfg.has(key) {
+            return cfg.get(key);
+        }
+        return def;
+    }
+
+    func cfg_int(self: server.ServerUtil, cfg: collections.Map<String, String>, key: String, def: Int) -> Int {
+        return self.atoi_or(self.cfg_get(cfg, key, ""), def);
+    }
+
+    func cfg_key_at(self: server.ServerUtil, base: String, key: String) -> String {
+        if len(base) == 0 {
+            return key;
+        }
+        return base + "." + key;
+    }
+
+    func cfg_get_at(self: server.ServerUtil, cfg: collections.Map<String, String>, base: String, key: String, def: String) -> String {
+        return self.cfg_get(cfg, self.cfg_key_at(base, key), def);
+    }
+
+    func cfg_int_at(self: server.ServerUtil, cfg: collections.Map<String, String>, base: String, key: String, def: Int) -> Int {
+        return self.atoi_or(self.cfg_get_at(cfg, base, key, ""), def);
+    }
+
+    func parse_size(self: server.ServerUtil, s: String, def: Int) -> Int {
+        let raw = strings.trim(s);
+        let n = len(raw);
+        if n == 0 {
+            return def;
+        }
+        let mult = 1;
+        let body = raw;
+        let last = strings.to_lower_ascii(substr(raw, n - 1, 1));
+        match last {
+            "k" => {
+                mult = 1024;
+                body = substr(raw, 0, n - 1);
+            },
+            "m" => {
+                mult = 1024 * 1024;
+                body = substr(raw, 0, n - 1);
+            },
+            "g" => {
+                mult = 1024 * 1024 * 1024;
+                body = substr(raw, 0, n - 1);
+            },
+            _ => {
+            }
+        }
+        return self.atoi_or(body, def) * mult;
+    }
+
+    func parse_time_ms(self: server.ServerUtil, s: String, def: Int) -> Int {
+        let raw = strings.trim(s);
+        let n = len(raw);
+        if n == 0 {
+            return def;
+        }
+        if n >= 2 && substr(raw, n - 2, 2) == "ms" {
+            return self.atoi_or(substr(raw, 0, n - 2), def);
+        }
+        let last = strings.to_lower_ascii(substr(raw, n - 1, 1));
+        if last == "s" {
+            return self.atoi_or(substr(raw, 0, n - 1), def / 1000) * 1000;
+        }
+        return self.atoi_or(raw, def / 1000) * 1000;
+    }
+
+    func starts_with(self: server.ServerUtil, s: String, prefix: String) -> Bool {
+        if len(prefix) > len(s) {
+            return false;
+        }
+        return substr(s, 0, len(prefix)) == prefix;
+    }
+
+    func simple_regex_suffix(self: server.ServerUtil, pattern: String) -> String {
+        if len(pattern) <= 1 {
+            return "";
+        }
+        if substr(pattern, len(pattern) - 1, 1) != "$" {
+            return "";
+        }
+        let body = substr(pattern, 0, len(pattern) - 1);
+        let out = "";
+        let escaped = false;
+        loop (let i = 0; i < len(body); i += 1) {
+            let ch = substr(body, i, 1);
+            if escaped {
+                out += ch;
+                escaped = false;
+            } else if ch == "\\" {
+                escaped = true;
+            } else if ch == "^" && len(out) == 0 {
+            } else if ch == "." && len(out) == 0 && i + 1 < len(body) && substr(body, i + 1, 1) == "*" {
+                i += 1;
+            } else if ch == "." || ch == "*" || ch == "+" || ch == "?" || ch == "[" || ch == "]" || ch == "(" || ch == ")" || ch == "|" {
+                return "";
+            } else {
+                out += ch;
+            }
+        }
+        if escaped {
+            return "";
+        }
+        return out;
+    }
+
+    func match_regex_loc(self: server.ServerUtil, pattern: String, path: String) -> Bool {
+        let suffix = self.simple_regex_suffix(pattern);
+        if len(suffix) > 0 {
+            return strings.ends_with(path, suffix);
+        }
+        return false;
+    }
+
+    func match_loc_at(self: server.ServerUtil, cfg: collections.Map<String, String>, base: String, path: String) -> Int {
+        let keys = new server.ConfigKeys();
+        let n = self.cfg_int_at(cfg, base, "loc_count", 1);
+        let best = 0;
+        let best_len = -1;
+        loop (let i = 0; i < n; i += 1) {
+            let p = self.cfg_get_at(cfg, base, keys.loc_key(i, ".prefix"), "/");
+            let mode = self.cfg_get_at(cfg, base, keys.loc_key(i, ".mode"), "prefix");
+            if mode == "exact" && path == p {
+                return i;
+            }
+            if mode == "regex" && self.match_regex_loc(p, path) {
+                return i;
+            }
+            if mode == "prefix" && self.starts_with(path, p) && len(p) > best_len {
+                best = i;
+                best_len = len(p);
+            }
+        }
+        return best;
+    }
+
+    func match_loc(self: server.ServerUtil, cfg: collections.Map<String, String>, path: String) -> Int {
+        return self.match_loc_at(cfg, "", path);
+    }
+
+    func clean_path(self: server.ServerUtil, path: String) -> String {
+        let p = path;
+        let q = strings.find_substr(p, "?");
+        if q >= 0 {
+            p = substr(p, 0, q);
+        }
+        if len(p) == 0 {
+            p = "/";
+        }
+        if strings.contains(p, "..") {
+            return "/";
+        }
+        return p;
+    }
+
+    func join_path(self: server.ServerUtil, root: String, path: String) -> String {
+        if len(path) > 0 && substr(path, 0, 1) == "/" {
+            path = substr(path, 1, len(path) - 1);
+        }
+        if len(root) == 0 {
+            return path;
+        }
+        if substr(root, len(root) - 1, 1) == "/" {
+            return root + path;
+        }
+        return root + "/" + path;
+    }
+
+    func mime(self: server.ServerUtil, path: String) -> String {
+        let lc = strings.to_lower_ascii(path);
+        if strings.contains(lc, ".html") {
+            return "text/html; charset=utf-8";
+        }
+        if strings.contains(lc, ".css") {
+            return "text/css; charset=utf-8";
+        }
+        if strings.contains(lc, ".js") {
+            return "application/javascript";
+        }
+        if strings.contains(lc, ".json") {
+            return "application/json";
+        }
+        if strings.contains(lc, ".txt") {
+            return "text/plain; charset=utf-8";
+        }
+        return "application/octet-stream";
+    }
+}

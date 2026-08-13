@@ -1,0 +1,133 @@
+module server;
+
+use aio.fs;
+use collections;
+use fs;
+use strconv;
+use strings;
+use std;
+
+class StaticFileServer {
+    func init(self: server.StaticFileServer) -> Void {
+    }
+
+    func try_path(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String, candidate: String) -> String {
+        let util = new server.ServerUtil();
+        let keys = new server.ConfigKeys();
+        let p = candidate;
+        if p == "$uri" {
+            p = path;
+        } else if p == "$uri/" {
+            p = path + "/";
+        } else if strings.contains(p, "$uri") {
+            p = path;
+        }
+        let alias_path = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".alias"), "");
+        if len(alias_path) > 0 {
+            let prefix = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".prefix"), "/");
+            let tail = path;
+            if util.starts_with(path, prefix) {
+                tail = substr(path, len(prefix), len(path) - len(prefix));
+            }
+            return util.join_path(alias_path, tail);
+        }
+        return util.join_path(util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".root"), util.cfg_get_at(cfg, cfg_base, "root", ".")), p);
+    }
+
+    async func serve_disk_file(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: server.HttpRequest, disk: String, keep_alive: Bool) -> String {
+        let util = new server.ServerUtil();
+        let factory = new server.HttpResponseFactory();
+        let content_type = util.mime(disk);
+        let body, body_err = await aio.fs.read_text(disk);
+        if body_err != OK {
+            return factory.response_conn(500, "text/plain", "read error", keep_alive);
+        }
+        let policy = new server.GzipPolicy();
+        if policy.should_compress(cfg, cfg_base, req, content_type, body) {
+            let encoded = server.ResponseEncoder<server.GzipResponseEncoder>.encode_response_body(new server.GzipResponseEncoder(), req, content_type, body);
+            return factory.response_extra(200, content_type, encoded.body, keep_alive, encoded.extra_headers);
+        }
+        let identity_encoded = server.ResponseEncoder<server.IdentityResponseEncoder>.encode_response_body(new server.IdentityResponseEncoder(), req, content_type, body);
+        return factory.response_extra(200, content_type, identity_encoded.body, keep_alive, identity_encoded.extra_headers);
+    }
+
+    async func serve_disk_file_with_policy(self: server.StaticFileServer, req: server.HttpRequest, disk: String, keep_alive: Bool, gzip_enabled: Bool, gzip_min_length: Int) -> String {
+        let util = new server.ServerUtil();
+        let factory = new server.HttpResponseFactory();
+        let content_type = util.mime(disk);
+        let body, body_err = await aio.fs.read_text(disk);
+        if body_err != OK {
+            return factory.response_conn(500, "text/plain", "read error", keep_alive);
+        }
+        let policy = new server.GzipPolicy();
+        if gzip_enabled && len(body) >= gzip_min_length && req.accepts_gzip() && policy.compressible_type(content_type) {
+            let encoded = server.ResponseEncoder<server.GzipResponseEncoder>.encode_response_body(new server.GzipResponseEncoder(), req, content_type, body);
+            return factory.response_extra(200, content_type, encoded.body, keep_alive, encoded.extra_headers);
+        }
+        let identity_encoded = server.ResponseEncoder<server.IdentityResponseEncoder>.encode_response_body(new server.IdentityResponseEncoder(), req, content_type, body);
+        return factory.response_extra(200, content_type, identity_encoded.body, keep_alive, identity_encoded.extra_headers);
+    }
+
+    func resolve_disk(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String) -> String {
+        let util = new server.ServerUtil();
+        let keys = new server.ConfigKeys();
+        let try_count = util.cfg_int_at(cfg, cfg_base, keys.loc_key(loc, ".try_count"), 0);
+        loop (let i = 0; i < try_count; i += 1) {
+            let cand = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".try.") + strconv.itoa(i), "$uri");
+            if cand == "=404" {
+                return "";
+            }
+            let disk = self.try_path(cfg, cfg_base, loc, path, cand);
+            let is_dir, dir_err = fs.stat_is_dir(disk);
+            if dir_err == OK && is_dir {
+                disk = util.join_path(disk, util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".index"), "index.html"));
+            }
+            let exists, ex_err = fs.exists(disk);
+            if ex_err == OK && exists {
+                return disk;
+            }
+        }
+        let p = path;
+        if p == "/" {
+            p = "/" + util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".index"), "index.html");
+        }
+        let fallback_disk = self.try_path(cfg, cfg_base, loc, p, p);
+        let fallback_exists, fallback_err = fs.exists(fallback_disk);
+        if fallback_err == OK && fallback_exists {
+            return fallback_disk;
+        }
+        return "";
+    }
+
+    async func serve(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: server.HttpRequest, loc: Int, path: String, keep_alive: Bool) -> String {
+        let util = new server.ServerUtil();
+        let keys = new server.ConfigKeys();
+        let factory = new server.HttpResponseFactory();
+        let try_count = util.cfg_int_at(cfg, cfg_base, keys.loc_key(loc, ".try_count"), 0);
+        loop (let i = 0; i < try_count; i += 1) {
+            let cand = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".try.") + strconv.itoa(i), "$uri");
+            if cand == "=404" {
+                return factory.response_conn(404, "text/plain; charset=utf-8", "Not Found", keep_alive);
+            }
+            let disk = self.try_path(cfg, cfg_base, loc, path, cand);
+            let is_dir, dir_err = fs.stat_is_dir(disk);
+            if dir_err == OK && is_dir {
+                disk = util.join_path(disk, util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".index"), "index.html"));
+            }
+            let exists, ex_err = fs.exists(disk);
+            if ex_err == OK && exists {
+                return await self.serve_disk_file(cfg, cfg_base, req, disk, keep_alive);
+            }
+        }
+        let p = path;
+        if p == "/" {
+            p = "/" + util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".index"), "index.html");
+        }
+        let fallback_disk = self.try_path(cfg, cfg_base, loc, p, p);
+        let fallback_exists, fallback_err = fs.exists(fallback_disk);
+        if fallback_err == OK && fallback_exists {
+            return await self.serve_disk_file(cfg, cfg_base, req, fallback_disk, keep_alive);
+        }
+        return factory.response_conn(404, "text/plain; charset=utf-8", "Not Found", keep_alive);
+    }
+}

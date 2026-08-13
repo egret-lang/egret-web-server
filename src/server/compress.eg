@@ -1,0 +1,426 @@
+module server;
+
+use collections;
+use encoding;
+use strings;
+use std;
+
+internal class GzipBytes {
+    func init(self: server.GzipBytes) -> Void {
+    }
+
+    func byte_char(self: server.GzipBytes, v: Int) -> String {
+        return encoding.byte_from_code(v & 255);
+    }
+
+    func u16_le(self: server.GzipBytes, v: Int) -> String {
+        return self.byte_char(v) + self.byte_char(v >> 8);
+    }
+
+    func u32_le(self: server.GzipBytes, v: Int) -> String {
+        return self.byte_char(v) + self.byte_char(v >> 8) + self.byte_char(v >> 16) + self.byte_char(v >> 24);
+    }
+}
+
+internal class GzipBitWriter {
+    var out: String;
+    var bits: Int;
+    var bit_count: Int;
+    var bytes: server.GzipBytes;
+
+    func init(self: server.GzipBitWriter) -> Void {
+        self.out = "";
+        self.bits = 0;
+        self.bit_count = 0;
+        self.bytes = new server.GzipBytes();
+    }
+
+    func write_bits(self: server.GzipBitWriter, value: Int, count: Int) -> Void {
+        self.bits = self.bits | ((value & ((1 << count) - 1)) << self.bit_count);
+        self.bit_count += count;
+        loop self.bit_count >= 8 {
+            self.out += self.bytes.byte_char(self.bits & 255);
+            self.bits = self.bits >> 8;
+            self.bit_count = self.bit_count - 8;
+        }
+    }
+
+    func finish(self: server.GzipBitWriter) -> String {
+        if self.bit_count > 0 {
+            self.out += self.bytes.byte_char(self.bits & 255);
+            self.bits = 0;
+            self.bit_count = 0;
+        }
+        return self.out;
+    }
+}
+
+internal class GzipMatch {
+    var length: Int;
+    var distance: Int;
+
+    func init(self: server.GzipMatch, length: Int = 0, distance: Int = 0) -> Void {
+        self.length = length;
+        self.distance = distance;
+    }
+}
+
+class GzipPolicy {
+    func init(self: server.GzipPolicy) -> Void {
+    }
+
+    func should_compress(self: server.GzipPolicy, cfg: collections.Map<String, String>, cfg_base: String, req: server.HttpRequest, content_type: String, body: String) -> Bool {
+        let util = new server.ServerUtil();
+        if util.cfg_get_at(cfg, cfg_base, "gzip", "off") != "on" {
+            return false;
+        }
+        if len(body) < util.cfg_int_at(cfg, cfg_base, "gzip_min_length", 1024) {
+            return false;
+        }
+        if !req.accepts_gzip() {
+            return false;
+        }
+        return self.compressible_type(content_type);
+    }
+
+    func compressible_type(self: server.GzipPolicy, content_type: String) -> Bool {
+        let lc = strings.to_lower_ascii(content_type);
+        if strings.contains(lc, "text/") {
+            return true;
+        }
+        if strings.contains(lc, "application/javascript") {
+            return true;
+        }
+        if strings.contains(lc, "application/json") {
+            return true;
+        }
+        if strings.contains(lc, "application/xml") {
+            return true;
+        }
+        return false;
+    }
+}
+
+class EncodedResponseBody {
+    var body: String;
+    var extra_headers: String;
+
+    func init(self: server.EncodedResponseBody, body: String, extra_headers: String = "") -> Void {
+        self.body = body;
+        self.extra_headers = extra_headers;
+    }
+}
+
+norm ResponseEncoder<T> {
+    func encode_response_body(self: T, req: server.HttpRequest, content_type: String, body: String) -> server.EncodedResponseBody;
+}
+
+class IdentityResponseEncoder {
+    func init(self: server.IdentityResponseEncoder) -> Void {
+    }
+}
+
+norm impl ResponseEncoder<server.IdentityResponseEncoder> {
+    func encode_response_body(self: server.IdentityResponseEncoder, req: server.HttpRequest, content_type: String, body: String) -> server.EncodedResponseBody {
+        return new server.EncodedResponseBody(body);
+    }
+}
+
+class GzipResponseEncoder {
+    var codec: server.GzipCodec;
+
+    func init(self: server.GzipResponseEncoder) -> Void {
+        self.codec = new server.GzipCodec();
+    }
+}
+
+norm impl ResponseEncoder<server.GzipResponseEncoder> {
+    func encode_response_body(self: server.GzipResponseEncoder, req: server.HttpRequest, content_type: String, body: String) -> server.EncodedResponseBody {
+        return new server.EncodedResponseBody(self.codec.encode(body), "\r\nContent-Encoding: gzip\r\nVary: Accept-Encoding");
+    }
+}
+
+internal class GzipFixedHuffman {
+    func init(self: server.GzipFixedHuffman) -> Void {
+    }
+
+    func reverse_bits(self: server.GzipFixedHuffman, value: Int, count: Int) -> Int {
+        let out = 0;
+        loop (let i = 0; i < count; i += 1) {
+            out = (out << 1) | ((value >> i) & 1);
+        }
+        return out;
+    }
+
+    func fixed_huffman_code(self: server.GzipFixedHuffman, symbol: Int) -> Int {
+        if symbol <= 143 {
+            return 48 + symbol;
+        }
+        if symbol <= 255 {
+            return 400 + (symbol - 144);
+        }
+        if symbol <= 279 {
+            return symbol - 256;
+        }
+        return 192 + (symbol - 280);
+    }
+
+    func fixed_huffman_bits(self: server.GzipFixedHuffman, symbol: Int) -> Int {
+        if symbol <= 143 {
+            return 8;
+        }
+        if symbol <= 255 {
+            return 9;
+        }
+        if symbol <= 279 {
+            return 7;
+        }
+        return 8;
+    }
+
+    func write_fixed_symbol(self: server.GzipFixedHuffman, bw: server.GzipBitWriter, symbol: Int) -> Void {
+        let bit_count = self.fixed_huffman_bits(symbol);
+        _ = bw.write_bits(self.reverse_bits(self.fixed_huffman_code(symbol), bit_count), bit_count);
+    }
+
+    func length_base(self: server.GzipFixedHuffman, code: Int) -> Int {
+        let base = match code {
+            257 => 3, 258 => 4, 259 => 5, 260 => 6, 261 => 7, 262 => 8, 263 => 9, 264 => 10,
+            265 => 11, 266 => 13, 267 => 15, 268 => 17, 269 => 19, 270 => 23, 271 => 27, 272 => 31,
+            273 => 35, 274 => 43, 275 => 51, 276 => 59, 277 => 67, 278 => 83, 279 => 99, 280 => 115,
+            281 => 131, 282 => 163, 283 => 195, 284 => 227, _ => 258,
+        };
+        return base;
+    }
+
+    func length_extra_bits(self: server.GzipFixedHuffman, code: Int) -> Int {
+        if code <= 264 {
+            return 0;
+        }
+        if code <= 268 {
+            return 1;
+        }
+        if code <= 272 {
+            return 2;
+        }
+        if code <= 276 {
+            return 3;
+        }
+        if code <= 280 {
+            return 4;
+        }
+        if code <= 284 {
+            return 5;
+        }
+        return 0;
+    }
+
+    func length_code(self: server.GzipFixedHuffman, length: Int) -> Int {
+        if length >= 258 {
+            return 285;
+        }
+        if length <= 10 {
+            return 254 + length;
+        }
+        if length <= 18 {
+            return 265 + ((length - 11) >> 1);
+        }
+        if length <= 34 {
+            return 269 + ((length - 19) >> 2);
+        }
+        if length <= 66 {
+            return 273 + ((length - 35) >> 3);
+        }
+        if length <= 130 {
+            return 277 + ((length - 67) >> 4);
+        }
+        return 281 + ((length - 131) >> 5);
+    }
+
+    func distance_base(self: server.GzipFixedHuffman, code: Int) -> Int {
+        let base = match code {
+            0 => 1, 1 => 2, 2 => 3, 3 => 4, 4 => 5, 5 => 7, 6 => 9, 7 => 13,
+            8 => 17, 9 => 25, 10 => 33, 11 => 49, 12 => 65, 13 => 97, 14 => 129, 15 => 193,
+            16 => 257, 17 => 385, 18 => 513, 19 => 769, 20 => 1025, 21 => 1537, 22 => 2049, 23 => 3073,
+            24 => 4097, 25 => 6145, 26 => 8193, 27 => 12289, 28 => 16385, _ => 24577,
+        };
+        return base;
+    }
+
+    func distance_extra_bits(self: server.GzipFixedHuffman, code: Int) -> Int {
+        if code <= 3 {
+            return 0;
+        }
+        return (code >> 1) - 1;
+    }
+
+    func distance_code(self: server.GzipFixedHuffman, distance: Int) -> Int {
+        loop (let code = 0; code < 29; code += 1) {
+            let next_base = self.distance_base(code + 1);
+            if distance < next_base {
+                return code;
+            }
+        }
+        return 29;
+    }
+
+    func write_length_distance(self: server.GzipFixedHuffman, bw: server.GzipBitWriter, length: Int, distance: Int) -> Void {
+        let lc = self.length_code(length);
+        _ = self.write_fixed_symbol(bw, lc);
+        let leb = self.length_extra_bits(lc);
+        if leb > 0 {
+            _ = bw.write_bits(length - self.length_base(lc), leb);
+        }
+        let dc = self.distance_code(distance);
+        _ = bw.write_bits(self.reverse_bits(dc, 5), 5);
+        let deb = self.distance_extra_bits(dc);
+        if deb > 0 {
+            _ = bw.write_bits(distance - self.distance_base(dc), deb);
+        }
+    }
+
+    func find_match(self: server.GzipFixedHuffman, data: String, pos: Int) -> server.GzipMatch {
+        let best_len = 0;
+        let best_dist = 0;
+        let max_back = pos;
+        if max_back > 2048 {
+            max_back = 2048;
+        }
+        loop (let dist = 1; dist <= max_back; dist += 1) {
+            if encoding.byte_at(data, pos - dist) == encoding.byte_at(data, pos) {
+                let l = 0;
+                loop l < 258 && pos + l < len(data) {
+                    if encoding.byte_at(data, pos - dist + l) == encoding.byte_at(data, pos + l) {
+                        l += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if l > best_len {
+                    best_len = l;
+                    best_dist = dist;
+                    if best_len >= 64 {
+                        return new server.GzipMatch(best_len, best_dist);
+                    }
+                }
+            }
+        }
+        if best_len < 3 {
+            return new server.GzipMatch();
+        }
+        return new server.GzipMatch(best_len, best_dist);
+    }
+}
+
+internal class GzipDeflater {
+    var huffman: server.GzipFixedHuffman;
+    var bytes: server.GzipBytes;
+
+    func init(self: server.GzipDeflater) -> Void {
+        self.huffman = new server.GzipFixedHuffman();
+        self.bytes = new server.GzipBytes();
+    }
+
+    func fixed(self: server.GzipDeflater, data: String) -> String {
+        let bw = new server.GzipBitWriter();
+        _ = bw.write_bits(1, 1);
+        _ = bw.write_bits(1, 2);
+        let i = 0;
+        loop i < len(data) {
+            let m = self.huffman.find_match(data, i);
+            if m.length >= 3 {
+                _ = self.huffman.write_length_distance(bw, m.length, m.distance);
+                i += m.length;
+            } else {
+                _ = self.huffman.write_fixed_symbol(bw, encoding.byte_at(data, i));
+                i += 1;
+            }
+        }
+        _ = self.huffman.write_fixed_symbol(bw, 256);
+        return bw.finish();
+    }
+
+    func stored(self: server.GzipDeflater, data: String) -> String {
+        let out = "";
+        let off = 0;
+        loop off < len(data) {
+            let take = len(data) - off;
+            if take > 65535 {
+                take = 65535;
+            }
+            let final_block = 0;
+            if off + take >= len(data) {
+                final_block = 1;
+            }
+            out += self.bytes.byte_char(final_block);
+            out += self.bytes.u16_le(take);
+            out += self.bytes.u16_le((take ^ 65535) & 65535);
+            out += substr(data, off, take);
+            off += take;
+        }
+        if len(data) == 0 {
+            out += self.bytes.byte_char(1) + self.bytes.u16_le(0) + self.bytes.u16_le(65535);
+        }
+        return out;
+    }
+}
+
+internal class GzipChecksum {
+    func init(self: server.GzipChecksum) -> Void {
+    }
+
+    func crc32(self: server.GzipChecksum, data: String) -> Int {
+        let crc = 4294967295;
+        let i = 0;
+        loop i < len(data) {
+            crc = crc ^ encoding.byte_at(data, i);
+            loop (let bit = 0; bit < 8; bit += 1) {
+                if (crc & 1) != 0 {
+                    crc = (crc >> 1) ^ 3988292384;
+                } else {
+                    crc = crc >> 1;
+                }
+            }
+            i += 1;
+        }
+        return crc ^ 4294967295;
+    }
+}
+
+class GzipCodec {
+    var bytes: server.GzipBytes;
+    var deflater: server.GzipDeflater;
+    var checksum: server.GzipChecksum;
+
+    func init(self: server.GzipCodec) -> Void {
+        self.bytes = new server.GzipBytes();
+        self.deflater = new server.GzipDeflater();
+        self.checksum = new server.GzipChecksum();
+    }
+
+    func encode(self: server.GzipCodec, data: String) -> String {
+        let deflated = self.deflater.fixed(data);
+        let stored = self.deflater.stored(data);
+        if len(stored) < len(deflated) {
+            deflated = stored;
+        }
+        let out = self.bytes.byte_char(31) + self.bytes.byte_char(139) + self.bytes.byte_char(8) + self.bytes.byte_char(0)
+        + self.bytes.byte_char(0) + self.bytes.byte_char(0) + self.bytes.byte_char(0) + self.bytes.byte_char(0)
+        + self.bytes.byte_char(0) + self.bytes.byte_char(255)
+        + deflated;
+        return out + self.bytes.u32_le(self.checksum.crc32(data)) + self.bytes.u32_le(len(data));
+    }
+}
+
+class GzipRequestCapabilities {
+    func init(self: server.GzipRequestCapabilities) -> Void {
+    }
+
+    func accepts_gzip(self: server.GzipRequestCapabilities, req: String) -> Bool {
+        let lc = strings.to_lower_ascii(req);
+        if strings.contains(lc, "\r\naccept-encoding:") {
+            return strings.contains(lc, "gzip");
+        }
+        return false;
+    }
+}

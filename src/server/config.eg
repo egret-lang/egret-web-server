@@ -1,0 +1,1172 @@
+module server;
+
+use collections;
+use fs;
+use strconv;
+use strings;
+use std;
+
+class ConfigTokenizer {
+    func init(self: server.ConfigTokenizer) -> Void {
+    }
+
+    func is_space(self: server.ConfigTokenizer, ch: String) -> Bool {
+        return match ch {
+            " " => true,
+            "\t" => true,
+            "\r" => true,
+            "\n" => true,
+            _ => false,
+        };
+    }
+
+    func is_sym(self: server.ConfigTokenizer, ch: String) -> Bool {
+        return match ch {
+            "{" => true,
+            "}" => true,
+            ";" => true,
+            _ => false,
+        };
+    }
+
+    func tokenize(self: server.ConfigTokenizer, conf: String) -> collections.Vector<String> {
+        let out = new collections.Vector<String>();
+        let n = len(conf);
+        let i = 0;
+        loop i < n {
+            let ch = substr(conf, i, 1);
+            if self.is_space(ch) {
+                i += 1;
+            } else if ch == "#" {
+                let stop_comment = false;
+                loop !stop_comment {
+                    if i >= n {
+                        stop_comment = true;
+                    } else if substr(conf, i, 1) == "\n" {
+                        stop_comment = true;
+                    } else {
+                        i += 1;
+                    }
+                }
+            } else if self.is_sym(ch) {
+                _ = out.push(ch);
+                i += 1;
+            } else if ch == "\"" {
+                let quote = ch;
+                let s = "";
+                i += 1;
+                let stop_quote = false;
+                loop !stop_quote {
+                    if i >= n {
+                        stop_quote = true;
+                    } else if substr(conf, i, 1) == quote {
+                        stop_quote = true;
+                    } else {
+                        s += substr(conf, i, 1);
+                        i += 1;
+                    }
+                }
+                _ = out.push(s);
+                if i < n {
+                    i += 1;
+                }
+            } else if ch == "'" {
+                let single_quote = ch;
+                let single_quoted_value = "";
+                i += 1;
+                let stop_single_quote = false;
+                loop !stop_single_quote {
+                    if i >= n {
+                        stop_single_quote = true;
+                    } else if substr(conf, i, 1) == single_quote {
+                        stop_single_quote = true;
+                    } else {
+                        single_quoted_value += substr(conf, i, 1);
+                        i += 1;
+                    }
+                }
+                _ = out.push(single_quoted_value);
+                if i < n {
+                    i += 1;
+                }
+            } else {
+                let tok = "";
+                loop i < n {
+                    let c = substr(conf, i, 1);
+                    let stop_tok = false;
+                    if self.is_space(c) {
+                        stop_tok = true;
+                    } else if self.is_sym(c) {
+                        stop_tok = true;
+                    } else if c == "#" {
+                        stop_tok = true;
+                    }
+                    if stop_tok {
+                        break;
+                    }
+                    tok += c;
+                    i += 1;
+                }
+                if len(tok) > 0 {
+                    _ = out.push(tok);
+                }
+            }
+        }
+        return out;
+    }
+}
+
+class ConfigCursor {
+    func init(self: server.ConfigCursor) -> Void {
+    }
+
+    func skip_stmt(self: server.ConfigCursor, ts: collections.Vector<String>, i: Int) -> Int {
+        if i < 0 {
+            i = 0;
+        }
+        loop i < ts.len() {
+            let t = ts.get(i);
+            if t == ";" {
+                return i + 1;
+            }
+            if t == "{" {
+                let depth = 1;
+                i += 1;
+                let stop_depth = false;
+                loop !stop_depth {
+                    if i >= ts.len() {
+                        stop_depth = true;
+                    } else if depth <= 0 {
+                        stop_depth = true;
+                    } else {
+                        let x = ts.get(i);
+                        if x == "{" {
+                            depth += 1;
+                        } else if x == "}" {
+                            depth = depth - 1;
+                        }
+                        i += 1;
+                    }
+                }
+                return i;
+            }
+            i += 1;
+        }
+        return i;
+    }
+
+    func val(self: server.ConfigCursor, ts: collections.Vector<String>, i: Int, def: String) -> String {
+        if i < 0 {
+            return def;
+        }
+        if i + 1 < ts.len() {
+            return ts.get(i + 1);
+        }
+        return def;
+    }
+
+    func consume(self: server.ConfigCursor, ts: collections.Vector<String>, i: Int) -> Int {
+        i += 2;
+        if i >= 0 && i < ts.len() && ts.get(i) == ";" {
+            return i + 1;
+        }
+        return self.skip_stmt(ts, i);
+    }
+}
+
+class ConfigKeys {
+    func init(self: server.ConfigKeys) -> Void {
+    }
+
+    func loc_key(self: server.ConfigKeys, idx: Int, suffix: String) -> String {
+        return "loc." + strconv.itoa(idx) + suffix;
+    }
+
+    func rewrite_key(self: server.ConfigKeys, idx: Int, suffix: String) -> String {
+        return "rewrite." + strconv.itoa(idx) + suffix;
+    }
+
+    func server_key(self: server.ConfigKeys, server_idx: Int, suffix: String) -> String {
+        return "server." + strconv.itoa(server_idx) + suffix;
+    }
+
+    func server_loc_key(self: server.ConfigKeys, server_idx: Int, loc_idx: Int, suffix: String) -> String {
+        return self.server_key(server_idx, ".loc." + strconv.itoa(loc_idx) + suffix);
+    }
+
+    func server_rewrite_key(self: server.ConfigKeys, server_idx: Int, rewrite_idx: Int, suffix: String) -> String {
+        return self.server_key(server_idx, ".rewrite." + strconv.itoa(rewrite_idx) + suffix);
+    }
+
+    func listen_key(self: server.ConfigKeys, idx: Int, suffix: String) -> String {
+        return "listen." + strconv.itoa(idx) + suffix;
+    }
+
+    func server_listen_key(self: server.ConfigKeys, server_idx: Int, listen_idx: Int, suffix: String) -> String {
+        return self.server_key(server_idx, ".listen." + strconv.itoa(listen_idx) + suffix);
+    }
+}
+
+class ConfigDsl {
+    var util: server.ServerUtil;
+    var cursor: server.ConfigCursor;
+    var keys: server.ConfigKeys;
+
+    func init(self: server.ConfigDsl) -> Void {
+        self.util = new server.ServerUtil();
+        self.cursor = new server.ConfigCursor();
+        self.keys = new server.ConfigKeys();
+    }
+
+    func encode_socket_path(self: server.ConfigDsl, path: String) -> String {
+        let out = "";
+        loop (let i: Int = 0; i < len(path); i += 1) {
+            let ch = substr(path, i, 1);
+            if ch == "z" {
+                out += "zz";
+            } else if ch == "/" {
+                out += "zS";
+            } else if ch == "." {
+                out += "zD";
+            } else if ch == "-" {
+                out += "zH";
+            } else if ch == "_" {
+                out += "zU";
+            } else {
+                out += ch;
+            }
+        }
+        return out;
+    }
+
+    func reset_server_workspace(self: server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
+        _ = cfg.set("listen_host", DEFAULT_LISTEN_HOST);
+        _ = cfg.set("listen_port", DEFAULT_LISTEN_PORT_TEXT);
+        _ = cfg.set("listen_count", "0");
+        _ = cfg.set("backlog", self.util.cfg_get(cfg, "default_backlog", DEFAULT_BACKLOG_TEXT));
+        _ = cfg.set("server_name", DEFAULT_SERVER_NAME);
+        _ = cfg.set("server_name_count", "0");
+        _ = cfg.set("server_names", DEFAULT_SERVER_NAMES);
+        _ = cfg.set("root", self.util.cfg_get(cfg, "default_root", DEFAULT_ROOT));
+        _ = cfg.set("index", self.util.cfg_get(cfg, "default_index", DEFAULT_INDEX));
+        _ = cfg.set("https_enabled", "0");
+        _ = cfg.set("https_redirect", "on");
+        _ = cfg.set("ssl_certificate", "");
+        _ = cfg.set("ssl_certificate_key", "");
+        _ = cfg.set("loc_count", "0");
+        _ = cfg.set("rewrite_count", "0");
+    }
+
+    func parse_listen_value(self: server.ConfigDsl, v: String, cfg: collections.Map<String, String>) -> Void {
+        _ = cfg.set("__listen_host", DEFAULT_LISTEN_HOST);
+        _ = cfg.set("__listen_port", DEFAULT_LISTEN_PORT_TEXT);
+        if self.util.starts_with(v, "[") {
+            let ipv6_port_sep = strings.last_index(v, ":");
+            if ipv6_port_sep > 0 {
+                _ = cfg.set("__listen_port", substr(v, ipv6_port_sep + 1, len(v) - (ipv6_port_sep + 1)));
+            }
+            return;
+        }
+        let p = strings.last_index(v, ":");
+        if p > 0 {
+            _ = cfg.set("__listen_host", substr(v, 0, p));
+            _ = cfg.set("__listen_port", substr(v, p + 1, len(v) - (p + 1)));
+        } else {
+            _ = cfg.set("__listen_port", v);
+        }
+    }
+
+    func listener_exists(self: server.ConfigDsl, cfg: collections.Map<String, String>, port: String, https: String) -> Bool {
+        let n = self.util.cfg_int(cfg, "listen_count", 0);
+        let i = 0;
+        loop i < n {
+            if self.util.cfg_get(cfg, self.keys.listen_key(i, ".port"), "") == port && self.util.cfg_get(cfg, self.keys.listen_key(i, ".https"), "0") == https {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    func add_listener(self: server.ConfigDsl, cfg: collections.Map<String, String>, host: String, port: String, https: String, backlog: String) -> Void {
+        if self.listener_exists(cfg, port, https) {
+            return;
+        }
+        let idx = self.util.cfg_int(cfg, "listen_count", 0);
+        _ = cfg.set(self.keys.listen_key(idx, ".host"), host);
+        _ = cfg.set(self.keys.listen_key(idx, ".port"), port);
+        _ = cfg.set(self.keys.listen_key(idx, ".https"), https);
+        _ = cfg.set(self.keys.listen_key(idx, ".backlog"), backlog);
+        _ = cfg.set("listen_count", strconv.itoa(idx + 1));
+        if idx == 0 {
+            _ = cfg.set("listen_host", host);
+            _ = cfg.set("listen_port", port);
+            _ = cfg.set("backlog", backlog);
+        }
+        if https == "1" {
+            _ = cfg.set("https_enabled", "1");
+        }
+    }
+
+    func add_server_name(self: server.ConfigDsl, cfg: collections.Map<String, String>, name: String) -> Void {
+        if len(name) == 0 {
+            return;
+        }
+        let lc = strings.to_lower_ascii(name);
+        let needle = "|" + lc + "|";
+        if strings.contains(self.util.cfg_get(cfg, "server_names", "|"), needle) {
+            return;
+        }
+        let n = self.util.cfg_int(cfg, "server_name_count", 0);
+        _ = cfg.set("server_name." + strconv.itoa(n), lc);
+        _ = cfg.set("server_name_count", strconv.itoa(n + 1));
+        _ = cfg.set("server_names", self.util.cfg_get(cfg, "server_names", "|") + lc + "|");
+        if n == 0 {
+            _ = cfg.set("server_name", lc);
+        }
+    }
+
+    func parse_server_name_stmt(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+        i += 1;
+        loop i < ts.len() {
+            let t = ts.get(i);
+            if t == ";" {
+                return i + 1;
+            }
+            if t == "{" {
+                return self.cursor.skip_stmt(ts, i);
+            }
+            self.add_server_name(cfg, t);
+            i += 1;
+        }
+        return i;
+    }
+
+    func ensure_default_location(self: server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
+        if self.util.cfg_int(cfg, "loc_count", 0) != 0 {
+            return;
+        }
+        _ = cfg.set("loc.0.prefix", "/");
+        _ = cfg.set("loc.0.mode", "prefix");
+        _ = cfg.set("loc.0.root", cfg.get("root"));
+        _ = cfg.set("loc.0.index", cfg.get("index"));
+        _ = cfg.set("loc.0.alias", "");
+        _ = cfg.set("loc.0.proxy_pass", "");
+        _ = cfg.set("loc.0.fastcgi_pass", "");
+        _ = cfg.set("loc.0.backend_kind", "");
+        _ = cfg.set("loc.0.fastcgi_backend", "");
+        _ = cfg.set("loc.0.fastcgi_unix_path", "");
+        _ = cfg.set("loc.0.fastcgi_index", DEFAULT_FASTCGI_INDEX);
+        _ = cfg.set("loc.0.fastcgi_param_count", "0");
+        _ = cfg.set("loc.0.try_count", "0");
+        _ = cfg.set("loc_count", "1");
+    }
+
+    func store_server_snapshot(self: server.ConfigDsl, cfg: collections.Map<String, String>, server_idx: Int) -> Void {
+        self.ensure_default_location(cfg);
+        if self.util.cfg_int(cfg, "listen_count", 0) == 0 {
+            self.add_listener(cfg, self.util.cfg_get(cfg, "listen_host", DEFAULT_LISTEN_HOST), DEFAULT_LISTEN_PORT_TEXT, self.util.cfg_get(cfg, "https_enabled", DEFAULT_HTTPS_ENABLED), self.util.cfg_get(cfg, "backlog", DEFAULT_BACKLOG_TEXT));
+        }
+        _ = cfg.set(self.keys.server_key(server_idx, ".server_name"), self.util.cfg_get(cfg, "server_name", DEFAULT_SERVER_NAME));
+        _ = cfg.set(self.keys.server_key(server_idx, ".server_name_count"), self.util.cfg_get(cfg, "server_name_count", "0"));
+        _ = cfg.set(self.keys.server_key(server_idx, ".server_names"), self.util.cfg_get(cfg, "server_names", DEFAULT_SERVER_NAMES));
+        loop (let name_i = 0; name_i < self.util.cfg_int(cfg, "server_name_count", 0); name_i += 1) {
+            _ = cfg.set(self.keys.server_key(server_idx, ".server_name." + strconv.itoa(name_i)), self.util.cfg_get(cfg, "server_name." + strconv.itoa(name_i), DEFAULT_SERVER_NAME));
+        }
+        _ = cfg.set(self.keys.server_key(server_idx, ".root"), self.util.cfg_get(cfg, "root", "."));
+        _ = cfg.set(self.keys.server_key(server_idx, ".index"), self.util.cfg_get(cfg, "index", DEFAULT_INDEX));
+        _ = cfg.set(self.keys.server_key(server_idx, ".ssl_certificate"), self.util.cfg_get(cfg, "ssl_certificate", ""));
+        _ = cfg.set(self.keys.server_key(server_idx, ".ssl_certificate_key"), self.util.cfg_get(cfg, "ssl_certificate_key", ""));
+        _ = cfg.set(self.keys.server_key(server_idx, ".https_redirect"), self.util.cfg_get(cfg, "https_redirect", DEFAULT_HTTPS_REDIRECT));
+        let listen_count = self.util.cfg_int(cfg, "listen_count", 0);
+        _ = cfg.set(self.keys.server_key(server_idx, ".listen_count"), strconv.itoa(listen_count));
+        loop (let li = 0; li < listen_count; li += 1) {
+            _ = cfg.set(self.keys.server_listen_key(server_idx, li, ".host"), self.util.cfg_get(cfg, self.keys.listen_key(li, ".host"), DEFAULT_LISTEN_HOST));
+            _ = cfg.set(self.keys.server_listen_key(server_idx, li, ".port"), self.util.cfg_get(cfg, self.keys.listen_key(li, ".port"), DEFAULT_LISTEN_PORT_TEXT));
+            _ = cfg.set(self.keys.server_listen_key(server_idx, li, ".https"), self.util.cfg_get(cfg, self.keys.listen_key(li, ".https"), "0"));
+            _ = cfg.set(self.keys.server_listen_key(server_idx, li, ".backlog"), self.util.cfg_get(cfg, self.keys.listen_key(li, ".backlog"), DEFAULT_BACKLOG_TEXT));
+        }
+        let loc_count = self.util.cfg_int(cfg, "loc_count", 0);
+        _ = cfg.set(self.keys.server_key(server_idx, ".loc_count"), strconv.itoa(loc_count));
+        loop (let loc = 0; loc < loc_count; loc += 1) {
+            let dst = self.keys.server_loc_key(server_idx, loc, "");
+            let src = self.keys.loc_key(loc, "");
+            _ = cfg.set(dst + ".prefix", self.util.cfg_get(cfg, src + ".prefix", "/"));
+            _ = cfg.set(dst + ".mode", self.util.cfg_get(cfg, src + ".mode", "prefix"));
+            _ = cfg.set(dst + ".root", self.util.cfg_get(cfg, src + ".root", self.util.cfg_get(cfg, "root", ".")));
+            _ = cfg.set(dst + ".index", self.util.cfg_get(cfg, src + ".index", self.util.cfg_get(cfg, "index", DEFAULT_INDEX)));
+            _ = cfg.set(dst + ".alias", self.util.cfg_get(cfg, src + ".alias", ""));
+            _ = cfg.set(dst + ".proxy_pass", self.util.cfg_get(cfg, src + ".proxy_pass", ""));
+            _ = cfg.set(dst + ".fastcgi_pass", "");
+            _ = cfg.set(dst + ".backend_kind", self.util.cfg_get(cfg, src + ".backend_kind", ""));
+            _ = cfg.set(dst + ".fastcgi_backend", self.util.cfg_get(cfg, src + ".fastcgi_backend", ""));
+            _ = cfg.set(dst + ".fastcgi_unix_path", self.util.cfg_get(cfg, src + ".fastcgi_unix_path", ""));
+            _ = cfg.set(dst + ".fastcgi_index", self.util.cfg_get(cfg, src + ".fastcgi_index", DEFAULT_FASTCGI_INDEX));
+            let fp_count = self.util.cfg_int(cfg, src + ".fastcgi_param_count", 0);
+            _ = cfg.set(dst + ".fastcgi_param_count", strconv.itoa(fp_count));
+            loop (let fpi = 0; fpi < fp_count; fpi += 1) {
+                _ = cfg.set(dst + ".fastcgi_param." + strconv.itoa(fpi) + ".name", self.util.cfg_get(cfg, src + ".fastcgi_param." + strconv.itoa(fpi) + ".name", ""));
+                _ = cfg.set(dst + ".fastcgi_param." + strconv.itoa(fpi) + ".value", self.util.cfg_get(cfg, src + ".fastcgi_param." + strconv.itoa(fpi) + ".value", ""));
+            }
+            let try_count = self.util.cfg_int(cfg, src + ".try_count", 0);
+            _ = cfg.set(dst + ".try_count", strconv.itoa(try_count));
+            loop (let ti = 0; ti < try_count; ti += 1) {
+                _ = cfg.set(dst + ".try." + strconv.itoa(ti), self.util.cfg_get(cfg, src + ".try." + strconv.itoa(ti), ""));
+            }
+        }
+        let rewrite_count = self.util.cfg_int(cfg, "rewrite_count", 0);
+        _ = cfg.set(self.keys.server_key(server_idx, ".rewrite_count"), strconv.itoa(rewrite_count));
+        loop (let ri = 0; ri < rewrite_count; ri += 1) {
+            _ = cfg.set(self.keys.server_rewrite_key(server_idx, ri, ".pattern"), self.util.cfg_get(cfg, self.keys.rewrite_key(ri, ".pattern"), ""));
+            _ = cfg.set(self.keys.server_rewrite_key(server_idx, ri, ".target"), self.util.cfg_get(cfg, self.keys.rewrite_key(ri, ".target"), ""));
+        }
+    }
+
+    func copy_server_config(self: server.ConfigDsl, cfg: collections.Map<String, String>, server_idx: Int, listen_idx: Int) -> collections.Map<String, String> {
+        let out = new collections.Map<String, String>();
+        _ = out.set("worker_processes", self.util.cfg_get(cfg, "worker_processes", DEFAULT_WORKER_PROCESSES_TEXT));
+        _ = out.set("worker_connections", self.util.cfg_get(cfg, "worker_connections", DEFAULT_WORKER_CONNECTIONS_TEXT));
+        _ = out.set("client_max_body_size", self.util.cfg_get(cfg, "client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE_TEXT));
+        _ = out.set("keepalive_timeout_ms", self.util.cfg_get(cfg, "keepalive_timeout_ms", DEFAULT_KEEPALIVE_TIMEOUT_MS_TEXT));
+        _ = out.set("proxy_timeout_ms", self.util.cfg_get(cfg, "proxy_timeout_ms", DEFAULT_PROXY_TIMEOUT_MS_TEXT));
+        _ = out.set("max_response_bytes", self.util.cfg_get(cfg, "max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES_TEXT));
+        _ = out.set("gzip", self.util.cfg_get(cfg, "gzip", DEFAULT_GZIP));
+        _ = out.set("gzip_min_length", self.util.cfg_get(cfg, "gzip_min_length", DEFAULT_GZIP_MIN_LENGTH_TEXT));
+        _ = out.set("server_name", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".server_name"), DEFAULT_SERVER_NAME));
+        _ = out.set("server_name_count", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".server_name_count"), "0"));
+        _ = out.set("server_names", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".server_names"), DEFAULT_SERVER_NAMES));
+        loop (let name_i = 0; name_i < self.util.cfg_int(cfg, self.keys.server_key(server_idx, ".server_name_count"), 0); name_i += 1) {
+            _ = out.set("server_name." + strconv.itoa(name_i), self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".server_name." + strconv.itoa(name_i)), DEFAULT_SERVER_NAME));
+        }
+        _ = out.set("root", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".root"), "."));
+        _ = out.set("index", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".index"), DEFAULT_INDEX));
+        _ = out.set("ssl_certificate", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".ssl_certificate"), ""));
+        _ = out.set("ssl_certificate_key", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".ssl_certificate_key"), ""));
+        _ = out.set("https_redirect", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".https_redirect"), DEFAULT_HTTPS_REDIRECT));
+        _ = out.set("listen_host", self.util.cfg_get(cfg, self.keys.server_listen_key(server_idx, listen_idx, ".host"), DEFAULT_LISTEN_HOST));
+        _ = out.set("listen_port", self.util.cfg_get(cfg, self.keys.server_listen_key(server_idx, listen_idx, ".port"), DEFAULT_LISTEN_PORT_TEXT));
+        _ = out.set("backlog", self.util.cfg_get(cfg, self.keys.server_listen_key(server_idx, listen_idx, ".backlog"), DEFAULT_BACKLOG_TEXT));
+        _ = out.set("https_enabled", self.util.cfg_get(cfg, self.keys.server_listen_key(server_idx, listen_idx, ".https"), "0"));
+        let loc_count = self.util.cfg_int(cfg, self.keys.server_key(server_idx, ".loc_count"), 0);
+        _ = out.set("loc_count", strconv.itoa(loc_count));
+        loop (let loc = 0; loc < loc_count; loc += 1) {
+            let dst = self.keys.loc_key(loc, "");
+            let src = self.keys.server_loc_key(server_idx, loc, "");
+            _ = out.set(dst + ".prefix", self.util.cfg_get(cfg, src + ".prefix", "/"));
+            _ = out.set(dst + ".mode", self.util.cfg_get(cfg, src + ".mode", "prefix"));
+            _ = out.set(dst + ".root", self.util.cfg_get(cfg, src + ".root", out.get("root")));
+            _ = out.set(dst + ".index", self.util.cfg_get(cfg, src + ".index", out.get("index")));
+            _ = out.set(dst + ".alias", self.util.cfg_get(cfg, src + ".alias", ""));
+            _ = out.set(dst + ".proxy_pass", self.util.cfg_get(cfg, src + ".proxy_pass", ""));
+            _ = out.set(dst + ".fastcgi_pass", "");
+            _ = out.set(dst + ".backend_kind", self.util.cfg_get(cfg, src + ".backend_kind", ""));
+            _ = out.set(dst + ".fastcgi_backend", self.util.cfg_get(cfg, src + ".fastcgi_backend", ""));
+            _ = out.set(dst + ".fastcgi_unix_path", self.util.cfg_get(cfg, src + ".fastcgi_unix_path", ""));
+            _ = out.set(dst + ".fastcgi_index", self.util.cfg_get(cfg, src + ".fastcgi_index", DEFAULT_FASTCGI_INDEX));
+            let fp_count = self.util.cfg_int(cfg, src + ".fastcgi_param_count", 0);
+            _ = out.set(dst + ".fastcgi_param_count", strconv.itoa(fp_count));
+            loop (let fpi = 0; fpi < fp_count; fpi += 1) {
+                _ = out.set(dst + ".fastcgi_param." + strconv.itoa(fpi) + ".name", self.util.cfg_get(cfg, src + ".fastcgi_param." + strconv.itoa(fpi) + ".name", ""));
+                _ = out.set(dst + ".fastcgi_param." + strconv.itoa(fpi) + ".value", self.util.cfg_get(cfg, src + ".fastcgi_param." + strconv.itoa(fpi) + ".value", ""));
+            }
+            let try_count = self.util.cfg_int(cfg, src + ".try_count", 0);
+            _ = out.set(dst + ".try_count", strconv.itoa(try_count));
+            loop (let ti = 0; ti < try_count; ti += 1) {
+                _ = out.set(dst + ".try." + strconv.itoa(ti), self.util.cfg_get(cfg, src + ".try." + strconv.itoa(ti), ""));
+            }
+        }
+        let rewrite_count = self.util.cfg_int(cfg, self.keys.server_key(server_idx, ".rewrite_count"), 0);
+        _ = out.set("rewrite_count", strconv.itoa(rewrite_count));
+        loop (let ri = 0; ri < rewrite_count; ri += 1) {
+            _ = out.set(self.keys.rewrite_key(ri, ".pattern"), self.util.cfg_get(cfg, self.keys.server_rewrite_key(server_idx, ri, ".pattern"), ""));
+            _ = out.set(self.keys.rewrite_key(ri, ".target"), self.util.cfg_get(cfg, self.keys.server_rewrite_key(server_idx, ri, ".target"), ""));
+        }
+        return out;
+    }
+
+    func parse_listen(self: server.ConfigDsl, v: String, cfg: collections.Map<String, String>) -> Void {
+        if self.util.starts_with(v, "[") {
+            let ipv6_port_sep = strings.last_index(v, ":");
+            if ipv6_port_sep > 0 && self.util.cfg_get(cfg, "listen_port", DEFAULT_LISTEN_PORT_TEXT) == DEFAULT_LISTEN_PORT_TEXT {
+                _ = cfg.set("listen_port", substr(v, ipv6_port_sep + 1, len(v) - (ipv6_port_sep + 1)));
+            }
+            return;
+        }
+        let p = strings.last_index(v, ":");
+        if p > 0 {
+            _ = cfg.set("listen_host", substr(v, 0, p));
+            _ = cfg.set("listen_port", substr(v, p + 1, len(v) - (p + 1)));
+        } else {
+            _ = cfg.set("listen_port", v);
+        }
+    }
+
+    func server_block_has_tls(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int) -> Bool {
+        if i >= ts.len() {
+            return false;
+        }
+        if ts.get(i) != "{" {
+            return false;
+        }
+        let depth = 1;
+        i += 1;
+        loop i < ts.len() {
+            let t = ts.get(i);
+            if t == "{" {
+                depth += 1;
+            } else if t == "}" {
+                depth = depth - 1;
+                if depth <= 0 {
+                    return false;
+                }
+            } else if depth == 1 {
+                if t == "ssl_certificate" {
+                    return true;
+                }
+                if t == "ssl_certificate_key" {
+                    return true;
+                }
+                if t == "listen" {
+                    let j = i + 1;
+                    loop j < ts.len() {
+                        let x = ts.get(j);
+                        if x == ";" {
+                            break;
+                        }
+                        if x == "{" {
+                            break;
+                        }
+                        if x == "ssl" {
+                            return true;
+                        }
+                        j += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    func parse_listen_stmt(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+        if i + 1 < ts.len() {
+            self.parse_listen_value(ts.get(i + 1), cfg);
+        }
+        let host = self.util.cfg_get(cfg, "__listen_host", DEFAULT_LISTEN_HOST);
+        let port = self.util.cfg_get(cfg, "__listen_port", DEFAULT_LISTEN_PORT_TEXT);
+        let https = "0";
+        let backlog = self.util.cfg_get(cfg, "backlog", DEFAULT_BACKLOG_TEXT);
+        i += 2;
+        loop i < ts.len() {
+            let t = strings.to_lower_ascii(ts.get(i));
+            if t == ";" {
+                _ = self.add_listener(cfg, host, port, https, backlog);
+                return i + 1;
+            }
+            if t == "{" {
+                _ = self.add_listener(cfg, host, port, https, backlog);
+                return self.cursor.skip_stmt(ts, i);
+            }
+            if strings.starts_with(t, "backlog=") {
+                backlog = substr(t, 8, len(t) - 8);
+            } else if t == "backlog" && i + 1 < ts.len() {
+                backlog = ts.get(i + 1);
+            } else if t == "ssl" {
+                https = "1";
+            }
+            i += 1;
+        }
+        self.add_listener(cfg, host, port, https, backlog);
+        return i;
+    }
+
+    func parse_rewrite_target(self: server.ConfigDsl, pattern: String, target: String, path: String) -> String {
+        if !self.util.starts_with(pattern, "^") {
+            return "";
+        }
+        if !strings.contains(pattern, "(.*)") {
+            return "";
+        }
+        let marker = strings.find_substr(pattern, "(.*)");
+        if marker < 1 {
+            return "";
+        }
+        let prefix = substr(pattern, 1, marker - 1);
+        if !self.util.starts_with(path, prefix) {
+            return "";
+        }
+        let cap = substr(path, len(prefix), len(path) - len(prefix));
+        let suffix_pos = marker + 4;
+        let suffix_len = len(pattern) - suffix_pos;
+        if suffix_len > 1 {
+            let suffix = substr(pattern, suffix_pos, suffix_len);
+            if substr(suffix, len(suffix) - 1, 1) == "$" {
+                suffix = substr(suffix, 0, len(suffix) - 1);
+            }
+            if len(suffix) > 0 && !strings.contains(path, suffix) {
+                return "";
+            }
+        }
+        let out = target;
+        let repl = strings.find_substr(out, "$1");
+        if repl >= 0 {
+            out = substr(out, 0, repl) + cap + substr(out, repl + 2, len(out) - (repl + 2));
+        }
+        return self.util.clean_path(out);
+    }
+
+    func apply_rewrites_at(self: server.ConfigDsl, cfg: collections.Map<String, String>, base: String, path: String) -> String {
+        let out = path;
+        let n = self.util.cfg_int_at(cfg, base, "rewrite_count", 0);
+        let i = 0;
+        loop i < n {
+            let next = self.parse_rewrite_target(self.util.cfg_get_at(cfg, base, self.keys.rewrite_key(i, ".pattern"), ""), self.util.cfg_get_at(cfg, base, self.keys.rewrite_key(i, ".target"), ""), out);
+            if len(next) > 0 {
+                return next;
+            }
+            i += 1;
+        }
+        return out;
+    }
+
+    func apply_rewrites(self: server.ConfigDsl, cfg: collections.Map<String, String>, path: String) -> String {
+        return self.apply_rewrites_at(cfg, "", path);
+    }
+
+    func parse_location(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>, loc_idx: Int) -> Int {
+        let prefix = self.cursor.val(ts, i, "/");
+        let mode = "prefix";
+        let block_i = i + 2;
+        if prefix == "=" {
+            mode = "exact";
+            if i + 2 < ts.len() {
+                prefix = ts.get(i + 2);
+            }
+            block_i = i + 3;
+        }
+        if prefix == "~" {
+            mode = "regex";
+            if i + 2 < ts.len() {
+                prefix = ts.get(i + 2);
+            }
+            block_i = i + 3;
+        }
+        let base = "loc." + strconv.itoa(loc_idx);
+        _ = cfg.set(base + ".prefix", prefix);
+        _ = cfg.set(base + ".mode", mode);
+        _ = cfg.set(base + ".root", self.util.cfg_get(cfg, "root", "."));
+        _ = cfg.set(base + ".index", self.util.cfg_get(cfg, "index", DEFAULT_INDEX));
+        _ = cfg.set(base + ".alias", "");
+        _ = cfg.set(base + ".proxy_pass", "");
+        _ = cfg.set(base + ".fastcgi_pass", "");
+        _ = cfg.set(base + ".backend_kind", "");
+        _ = cfg.set(base + ".fastcgi_backend", "");
+        _ = cfg.set(base + ".fastcgi_unix_path", "");
+        _ = cfg.set(base + ".fastcgi_index", DEFAULT_FASTCGI_INDEX);
+        _ = cfg.set(base + ".fastcgi_param_count", "0");
+        _ = cfg.set(base + ".try_count", "0");
+        i = block_i;
+        if i >= ts.len() {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        if ts.get(i) != "{" {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        i += 1;
+        let try_count = 0;
+        let fastcgi_param_count = 0;
+        loop i < ts.len() {
+            let t = ts.get(i);
+            if t == "}" {
+                _ = cfg.set(base + ".try_count", strconv.itoa(try_count));
+                _ = cfg.set(base + ".fastcgi_param_count", strconv.itoa(fastcgi_param_count));
+                return i + 1;
+            }
+            match t {
+                "root" => {
+                    _ = cfg.set(base + ".root", self.cursor.val(ts, i, cfg.get(base + ".root")));
+                    i = self.cursor.consume(ts, i);
+                },
+                "alias" => {
+                    _ = cfg.set(base + ".alias", self.cursor.val(ts, i, ""));
+                    i = self.cursor.consume(ts, i);
+                },
+                "index" => {
+                    _ = cfg.set(base + ".index", self.cursor.val(ts, i, cfg.get(base + ".index")));
+                    i = self.cursor.consume(ts, i);
+                },
+                "proxy_pass" => {
+                    _ = cfg.set(base + ".proxy_pass", self.cursor.val(ts, i, ""));
+                    i = self.cursor.consume(ts, i);
+                },
+                "fastcgi_pass" => {
+                    let pass_value = self.cursor.val(ts, i, "");
+                    if strings.starts_with(pass_value, "unix:") {
+                        pass_value = "uds" + self.encode_socket_path(substr(pass_value, 5, len(pass_value) - 5));
+                    }
+                    _ = cfg.set(base + ".backend_kind", "fastcgi");
+                    _ = cfg.set(base + ".fastcgi_backend", pass_value);
+                    _ = cfg.set(base + ".fastcgi_pass", "");
+                    i = self.cursor.consume(ts, i);
+                },
+                "fastcgi_index" => {
+                    _ = cfg.set(base + ".fastcgi_index", self.cursor.val(ts, i, DEFAULT_FASTCGI_INDEX));
+                    i = self.cursor.consume(ts, i);
+                },
+                "fastcgi_param" => {
+                    if i + 2 < ts.len() {
+                        _ = cfg.set(base + ".fastcgi_param." + strconv.itoa(fastcgi_param_count) + ".name", ts.get(i + 1));
+                        _ = cfg.set(base + ".fastcgi_param." + strconv.itoa(fastcgi_param_count) + ".value", ts.get(i + 2));
+                        fastcgi_param_count += 1;
+                    }
+                    i = self.cursor.consume(ts, i);
+                },
+                "proxy_set_header" => {
+                    i = self.cursor.consume(ts, i);
+                },
+                "try_files" => {
+                    i += 1;
+                    let stop_try = false;
+                    loop !stop_try {
+                        if i >= ts.len() {
+                            stop_try = true;
+                        } else if ts.get(i) == ";" {
+                            stop_try = true;
+                        } else {
+                            _ = cfg.set(base + ".try." + strconv.itoa(try_count), ts.get(i));
+                            try_count += 1;
+                            i += 1;
+                        }
+                    }
+                    if i < ts.len() {
+                        i += 1;
+                    }
+                },
+                _ => {
+                    i = self.cursor.skip_stmt(ts, i);
+                }
+            }
+        }
+        _ = cfg.set(base + ".try_count", strconv.itoa(try_count));
+        _ = cfg.set(base + ".fastcgi_param_count", strconv.itoa(fastcgi_param_count));
+        return i;
+    }
+
+    func parse_server(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+        if i >= ts.len() {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        if ts.get(i) != "{" {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        i += 1;
+        let loc_count = self.util.cfg_int(cfg, "loc_count", 0);
+        let rewrite_count = self.util.cfg_int(cfg, "rewrite_count", 0);
+        loop i < ts.len() {
+            let t = ts.get(i);
+            if t == "}" {
+                _ = cfg.set("loc_count", strconv.itoa(loc_count));
+                _ = cfg.set("rewrite_count", strconv.itoa(rewrite_count));
+                return i + 1;
+            }
+            match t {
+                "listen" => {
+                    i = self.parse_listen_stmt(ts, i, cfg);
+                },
+                "server_name" => {
+                    i = self.parse_server_name_stmt(ts, i, cfg);
+                },
+                "root" => {
+                    _ = cfg.set("root", self.cursor.val(ts, i, "."));
+                    i = self.cursor.consume(ts, i);
+                },
+                "index" => {
+                    _ = cfg.set("index", self.cursor.val(ts, i, DEFAULT_INDEX));
+                    i = self.cursor.consume(ts, i);
+                },
+                "backlog" => {
+                    _ = cfg.set("backlog", self.cursor.val(ts, i, DEFAULT_BACKLOG_TEXT));
+                    i = self.cursor.consume(ts, i);
+                },
+                "client_max_body_size" => {
+                    _ = cfg.set("client_max_body_size", strconv.itoa(self.util.parse_size(self.cursor.val(ts, i, ""), DEFAULT_CLIENT_MAX_BODY_SIZE)));
+                    i = self.cursor.consume(ts, i);
+                },
+                "keepalive_timeout" => {
+                    _ = cfg.set("keepalive_timeout_ms", strconv.itoa(self.util.parse_time_ms(self.cursor.val(ts, i, ""), DEFAULT_KEEPALIVE_TIMEOUT_MS)));
+                    i = self.cursor.consume(ts, i);
+                },
+                "gzip" => {
+                    _ = cfg.set("gzip", strings.to_lower_ascii(self.cursor.val(ts, i, DEFAULT_GZIP)));
+                    i = self.cursor.consume(ts, i);
+                },
+                "gzip_min_length" => {
+                    _ = cfg.set("gzip_min_length", strconv.itoa(self.util.parse_size(self.cursor.val(ts, i, ""), DEFAULT_GZIP_MIN_LENGTH)));
+                    i = self.cursor.consume(ts, i);
+                },
+                "ssl_certificate" => {
+                    _ = cfg.set("ssl_certificate", self.cursor.val(ts, i, ""));
+                    i = self.cursor.consume(ts, i);
+                },
+                "ssl_certificate_key" => {
+                    _ = cfg.set("ssl_certificate_key", self.cursor.val(ts, i, ""));
+                    i = self.cursor.consume(ts, i);
+                },
+                "https_redirect" => {
+                    _ = cfg.set("https_redirect", strings.to_lower_ascii(self.cursor.val(ts, i, DEFAULT_HTTPS_REDIRECT)));
+                    i = self.cursor.consume(ts, i);
+                },
+                "location" => {
+                    i = self.parse_location(ts, i, cfg, loc_count);
+                    loc_count += 1;
+                },
+                "rewrite" => {
+                    if i + 2 < ts.len() {
+                        _ = cfg.set(self.keys.rewrite_key(rewrite_count, ".pattern"), ts.get(i + 1));
+                        _ = cfg.set(self.keys.rewrite_key(rewrite_count, ".target"), ts.get(i + 2));
+                        rewrite_count += 1;
+                        _ = cfg.set("rewrite_count", strconv.itoa(rewrite_count));
+                    }
+                    i = self.cursor.consume(ts, i);
+                },
+                _ => {
+                    i = self.cursor.skip_stmt(ts, i);
+                }
+            }
+        }
+        _ = cfg.set("loc_count", strconv.itoa(loc_count));
+        _ = cfg.set("rewrite_count", strconv.itoa(rewrite_count));
+        return i;
+    }
+
+    func parse_events(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+        if i >= ts.len() {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        if ts.get(i) != "{" {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        i += 1;
+        loop i < ts.len() {
+            let t = ts.get(i);
+            if t == "}" {
+                return i + 1;
+            }
+            match t {
+                "worker_connections" => {
+                    _ = cfg.set("worker_connections", self.cursor.val(ts, i, DEFAULT_WORKER_CONNECTIONS_TEXT));
+                    i = self.cursor.consume(ts, i);
+                },
+                _ => {
+                    i = self.cursor.skip_stmt(ts, i);
+                }
+            }
+        }
+        return i;
+    }
+
+    func parse_http(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+        if i >= ts.len() {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        if ts.get(i) != "{" {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        i += 1;
+        loop i < ts.len() {
+            let t = ts.get(i);
+            if t == "}" {
+                return i + 1;
+            }
+            match t {
+                "server" => {
+                    _ = cfg.set("server_total", strconv.itoa(self.util.cfg_int(cfg, "server_total", 0) + 1));
+                    let is_tls = self.server_block_has_tls(ts, i + 1);
+                    if is_tls {
+                        _ = cfg.set("https_available", "1");
+                    }
+                    let server_idx = self.util.cfg_int(cfg, "server_count", 0);
+                    self.reset_server_workspace(cfg);
+                    i = self.parse_server(ts, i + 1, cfg);
+                    self.store_server_snapshot(cfg, server_idx);
+                    _ = cfg.set("server_count", strconv.itoa(server_idx + 1));
+                },
+                "client_max_body_size" => {
+                    _ = cfg.set("client_max_body_size", strconv.itoa(self.util.parse_size(self.cursor.val(ts, i, ""), DEFAULT_CLIENT_MAX_BODY_SIZE)));
+                    i = self.cursor.consume(ts, i);
+                },
+                "backlog" => {
+                    _ = cfg.set("default_backlog", self.cursor.val(ts, i, DEFAULT_BACKLOG_TEXT));
+                    _ = cfg.set("backlog", self.cursor.val(ts, i, DEFAULT_BACKLOG_TEXT));
+                    i = self.cursor.consume(ts, i);
+                },
+                "keepalive_timeout" => {
+                    _ = cfg.set("keepalive_timeout_ms", strconv.itoa(self.util.parse_time_ms(self.cursor.val(ts, i, ""), DEFAULT_KEEPALIVE_TIMEOUT_MS)));
+                    i = self.cursor.consume(ts, i);
+                },
+                "gzip" => {
+                    _ = cfg.set("gzip", strings.to_lower_ascii(self.cursor.val(ts, i, DEFAULT_GZIP)));
+                    i = self.cursor.consume(ts, i);
+                },
+                "gzip_min_length" => {
+                    _ = cfg.set("gzip_min_length", strconv.itoa(self.util.parse_size(self.cursor.val(ts, i, ""), DEFAULT_GZIP_MIN_LENGTH)));
+                    i = self.cursor.consume(ts, i);
+                },
+                _ => {
+                    i = self.cursor.skip_stmt(ts, i);
+                }
+            }
+        }
+        return i;
+    }
+
+    func config_set_defaults(self: server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
+        _ = cfg.set("worker_processes", DEFAULT_WORKER_PROCESSES_TEXT);
+        _ = cfg.set("worker_connections", DEFAULT_WORKER_CONNECTIONS_TEXT);
+        _ = cfg.set("listen_host", DEFAULT_LISTEN_HOST);
+        _ = cfg.set("listen_port", DEFAULT_LISTEN_PORT_TEXT);
+        _ = cfg.set("backlog", DEFAULT_BACKLOG_TEXT);
+        _ = cfg.set("default_backlog", DEFAULT_BACKLOG_TEXT);
+        _ = cfg.set("server_name", DEFAULT_SERVER_NAME);
+        _ = cfg.set("root", DEFAULT_ROOT);
+        _ = cfg.set("default_root", DEFAULT_ROOT);
+        _ = cfg.set("index", DEFAULT_INDEX);
+        _ = cfg.set("default_index", DEFAULT_INDEX);
+        _ = cfg.set("client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE_TEXT);
+        _ = cfg.set("keepalive_timeout_ms", DEFAULT_KEEPALIVE_TIMEOUT_MS_TEXT);
+        _ = cfg.set("proxy_timeout_ms", DEFAULT_PROXY_TIMEOUT_MS_TEXT);
+        _ = cfg.set("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES_TEXT);
+        _ = cfg.set("gzip", DEFAULT_GZIP);
+        _ = cfg.set("gzip_min_length", DEFAULT_GZIP_MIN_LENGTH_TEXT);
+        _ = cfg.set("https_enabled", DEFAULT_HTTPS_ENABLED);
+        _ = cfg.set("https_redirect", DEFAULT_HTTPS_REDIRECT);
+        _ = cfg.set("ssl_certificate", "");
+        _ = cfg.set("ssl_certificate_key", "");
+        _ = cfg.set("loc_count", "0");
+        _ = cfg.set("rewrite_count", "0");
+        _ = cfg.set("server_total", "0");
+        _ = cfg.set("server_count", "0");
+        _ = cfg.set("https_available", "0");
+    }
+}
+
+class ConfigBuilder {
+    var cfg: collections.Map<String, String>;
+    var dsl: server.ConfigDsl;
+
+    func init(self: server.ConfigBuilder) -> Void {
+        self.cfg = new collections.Map<String, String>();
+        self.dsl = new server.ConfigDsl();
+        self.dsl.config_set_defaults(self.cfg);
+    }
+
+    func normalize_unix_fastcgi_pass(self: server.ConfigBuilder, conf: String) -> String {
+        let out = "";
+        let needle = "fastcgi_pass unix:";
+        let i = 0;
+        loop (; i < len(conf); ) {
+            if i + len(needle) <= len(conf) && substr(conf, i, len(needle)) == needle {
+                out += "fastcgi_pass uds";
+                i += len(needle);
+                let path = "";
+                loop (; i < len(conf) && substr(conf, i, 1) != ";"; i += 1) {
+                    path += substr(conf, i, 1);
+                }
+                out += self.dsl.encode_socket_path(path);
+            } else {
+                out += substr(conf, i, 1);
+                i += 1;
+            }
+        }
+        return out;
+    }
+
+    func parse(self: server.ConfigBuilder, conf: String) -> collections.Map<String, String> {
+        let normalized_conf = self.normalize_unix_fastcgi_pass(conf);
+        let ts = (new server.ConfigTokenizer()).tokenize(normalized_conf);
+        let out = (new server.ConfigParser(self.cfg, ts)).parse();
+        _ = ts.free();
+        return out;
+    }
+}
+
+class ConfigParser {
+    var cfg: collections.Map<String, String>;
+    var ts: collections.Vector<String>;
+    var dsl: server.ConfigDsl;
+
+    func init(self: server.ConfigParser, cfg: collections.Map<String, String>, ts: collections.Vector<String>) -> Void {
+        self.cfg = cfg;
+        self.ts = ts;
+        self.dsl = new server.ConfigDsl();
+    }
+
+    func parse_server_block(self: server.ConfigParser, i: Int) -> Int {
+        _ = self.cfg.set("server_total", strconv.itoa(self.dsl.util.cfg_int(self.cfg, "server_total", 0) + 1));
+        let is_tls = self.dsl.server_block_has_tls(self.ts, i + 1);
+        if is_tls {
+            _ = self.cfg.set("https_available", "1");
+        }
+        let server_idx = self.dsl.util.cfg_int(self.cfg, "server_count", 0);
+        self.dsl.reset_server_workspace(self.cfg);
+        let next = self.dsl.parse_server(self.ts, i + 1, self.cfg);
+        self.dsl.store_server_snapshot(self.cfg, server_idx);
+        _ = self.cfg.set("server_count", strconv.itoa(server_idx + 1));
+        return next;
+    }
+
+    func ensure_server(self: server.ConfigParser) -> Void {
+        if self.dsl.util.cfg_int(self.cfg, "server_count", 0) == 0 {
+            self.dsl.reset_server_workspace(self.cfg);
+            self.dsl.ensure_default_location(self.cfg);
+            self.dsl.store_server_snapshot(self.cfg, 0);
+            _ = self.cfg.set("server_count", "1");
+        }
+    }
+
+    func parse(self: server.ConfigParser) -> collections.Map<String, String> {
+        let i = 0;
+        loop i < self.ts.len() {
+            let t = self.ts.get(i);
+            match t {
+                "worker_processes" => {
+                    let v = self.dsl.cursor.val(self.ts, i, "1");
+                    if v == "auto" {
+                        _ = self.cfg.set("worker_processes", "4");
+                    } else {
+                        _ = self.cfg.set("worker_processes", v);
+                    }
+                    i = self.dsl.cursor.consume(self.ts, i);
+                },
+                "events" => {
+                    i = self.dsl.parse_events(self.ts, i + 1, self.cfg);
+                },
+                "http" => {
+                    i = self.dsl.parse_http(self.ts, i + 1, self.cfg);
+                },
+                "server" => {
+                    i = self.parse_server_block(i);
+                },
+                _ => {
+                    i = self.dsl.cursor.skip_stmt(self.ts, i);
+                }
+            }
+        }
+        _ = self.ensure_server();
+        return self.cfg;
+    }
+}
+
+class ServerConfig {
+    var cfg: collections.Map<String, String>;
+
+    func init(self: server.ServerConfig, cfg: collections.Map<String, String>) -> Void {
+        self.cfg = cfg;
+    }
+
+    func get(self: server.ServerConfig, key: String, def: String = "") -> String {
+        return (new server.ServerUtil()).cfg_get(self.cfg, key, def);
+    }
+
+    func int(self: server.ServerConfig, key: String, def: Int = 0) -> Int {
+        return (new server.ServerUtil()).cfg_int(self.cfg, key, def);
+    }
+
+    func summary(self: server.ServerConfig) -> String {
+        return (new server.ConfigSummary()).render(self.cfg);
+    }
+}
+
+norm ConfigSource<T> {
+    func config_source_load(self: T) -> collections.Map<String, String>, ErrCode;
+}
+
+class TextConfigSource {
+    var text: String;
+
+    func init(self: server.TextConfigSource, text: String) -> Void {
+        self.text = text;
+    }
+}
+
+norm impl ConfigSource<server.TextConfigSource> {
+    func config_source_load(self: server.TextConfigSource) -> collections.Map<String, String>, ErrCode {
+        let builder = new server.ConfigBuilder();
+        return builder.parse(self.text), OK;
+    }
+}
+
+class FileConfigSource {
+    var path: String;
+
+    func init(self: server.FileConfigSource, path: String) -> Void {
+        self.path = path;
+    }
+}
+
+norm impl ConfigSource<server.FileConfigSource> {
+    func config_source_load(self: server.FileConfigSource) -> collections.Map<String, String>, ErrCode {
+        let text = fs.read_text(self.path)?;
+        return server.ConfigSource<server.TextConfigSource>.config_source_load(new server.TextConfigSource(text));
+    }
+}
+
+class ConfigLoader {
+    func init(self: server.ConfigLoader) -> Void {
+    }
+
+    func parse_tokens(self: server.ConfigLoader, cfg: collections.Map<String, String>, ts: collections.Vector<String>) -> collections.Map<String, String> {
+        return (new server.ConfigParser(cfg, ts)).parse();
+    }
+
+    func parse_text(self: server.ConfigLoader, conf: String) -> collections.Map<String, String> {
+        let cfg, err = server.ConfigSource<server.TextConfigSource>.config_source_load(new server.TextConfigSource(conf));
+        if err != OK {
+            return new collections.Map<String, String>();
+        }
+        return cfg;
+    }
+
+    func load(self: server.ConfigLoader, path: String) -> collections.Map<String, String>, ErrCode {
+        return server.ConfigSource<server.FileConfigSource>.config_source_load(new server.FileConfigSource(path));
+    }
+}
+
+class ConfigSummary {
+    func init(self: server.ConfigSummary) -> Void {
+    }
+
+    func render(self: server.ConfigSummary, cfg: collections.Map<String, String>) -> String {
+        let util = new server.ServerUtil();
+        let keys = new server.ConfigKeys();
+        let listeners = "";
+        let http_listeners = 0;
+        let https_listeners = 0;
+        loop (let s = 0; s < util.cfg_int(cfg, "server_count", 0); s += 1) {
+            loop (let li = 0; li < util.cfg_int(cfg, keys.server_key(s, ".listen_count"), 0); li += 1) {
+                let tls = util.cfg_get(cfg, keys.server_listen_key(s, li, ".https"), "0");
+                if tls == "1" {
+                    https_listeners += 1;
+                } else {
+                    http_listeners += 1;
+                }
+                listeners += "\nlisten." + strconv.itoa(s) + "." + strconv.itoa(li) + "="
+                + util.cfg_get(cfg, keys.server_listen_key(s, li, ".host"), "")
+                + ":" + util.cfg_get(cfg, keys.server_listen_key(s, li, ".port"), "")
+                + " https=" + tls
+                + " backlog=" + util.cfg_get(cfg, keys.server_listen_key(s, li, ".backlog"), "");
+            }
+        }
+        return "egret-web-server config ok\n"
+        + "listeners=" + strconv.itoa(http_listeners + https_listeners)
+        + "\nhttp_listeners=" + strconv.itoa(http_listeners)
+        + "\nhttps_listeners=" + strconv.itoa(https_listeners)
+        + listeners
+        + "\nworkers=" + util.cfg_get(cfg, "worker_processes", "")
+        + "\ngzip=" + util.cfg_get(cfg, "gzip", DEFAULT_GZIP)
+        + "\nhttps_available=" + util.cfg_get(cfg, "https_available", "0")
+        + "\nservers=" + util.cfg_get(cfg, "server_total", "0")
+        + "\nparsed_servers=" + util.cfg_get(cfg, "server_count", "0")
+        + "\n";
+    }
+}

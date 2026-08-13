@@ -1,0 +1,450 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>egret-web-server</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f6fb;
+        --surface: #ffffff;
+        --surface-soft: #f8fafc;
+        --border: #d9e0ea;
+        --text: #111827;
+        --muted: #5d6676;
+        --accent: #1d4ed8;
+        --accent-soft: #e8f0ff;
+        --accent-2: #0f766e;
+        --code-bg: #111827;
+        --code-text: #e5edf8;
+        --shadow: rgba(15, 23, 42, 0.1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        overflow-x: hidden;
+        background:
+          radial-gradient(circle at 18% 10%, rgba(29, 78, 216, 0.12), transparent 28%),
+          radial-gradient(circle at 88% 22%, rgba(15, 118, 110, 0.1), transparent 30%),
+          linear-gradient(180deg, #ffffff 0%, var(--bg) 54%, #eef2f7 100%);
+        color: var(--text);
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background:
+          linear-gradient(90deg, rgba(15, 23, 42, 0.035) 1px, transparent 1px),
+          linear-gradient(rgba(15, 23, 42, 0.035) 1px, transparent 1px);
+        background-size: 56px 56px;
+        mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.55), transparent 70%);
+        pointer-events: none;
+      }
+
+      .page {
+        position: relative;
+        width: min(1120px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 56px 0 28px;
+      }
+
+      main {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 26px 80px var(--shadow);
+        overflow: hidden;
+      }
+
+      .hero {
+        position: relative;
+        isolation: isolate;
+        min-height: 220px;
+        display: flex;
+        align-items: flex-start;
+        padding: 52px 58px 34px;
+        background:
+          linear-gradient(115deg, rgba(255, 255, 255, 0.96) 0%, rgba(239, 246, 255, 0.95) 48%, rgba(236, 253, 245, 0.82) 100%);
+        border-bottom: 1px solid var(--border);
+        overflow: hidden;
+      }
+
+      .hero::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 42%;
+        height: 100%;
+        background:
+          linear-gradient(135deg, rgba(29, 78, 216, 0.1), rgba(15, 118, 110, 0.1)),
+          repeating-linear-gradient(135deg, rgba(29, 78, 216, 0.11) 0 1px, transparent 1px 16px);
+        clip-path: polygon(28% 0, 100% 0, 100% 100%, 0 100%);
+        z-index: -1;
+      }
+
+      .hero::after {
+        content: "";
+        position: absolute;
+        left: 58px;
+        right: 58px;
+        bottom: 16px;
+        height: 4px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--accent), var(--accent-2), transparent);
+        opacity: 0.55;
+      }
+
+      .hero-content {
+        max-width: 790px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(28px, 4.4vw, 46px);
+        line-height: 0.96;
+        font-weight: 800;
+        letter-spacing: 0;
+        white-space: nowrap;
+      }
+
+      .lead {
+        max-width: none;
+        margin: 24px 0 0;
+        color: #374151;
+        font-size: 22px;
+        line-height: 1.5;
+        white-space: nowrap;
+      }
+
+      section {
+        padding: 42px 52px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      section:last-of-type {
+        border-bottom: 0;
+      }
+
+      h2 {
+        margin: 0 0 18px;
+        font-size: 24px;
+        line-height: 1.2;
+        font-weight: 760;
+        letter-spacing: 0;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .item {
+        min-height: 86px;
+        padding: 18px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-soft);
+      }
+
+      .item code,
+      .runtime-list code,
+      .commands code {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.92em;
+      }
+
+      .item p {
+        margin: 8px 0 0;
+        color: var(--muted);
+        line-height: 1.48;
+      }
+
+      .item-title {
+        color: var(--text);
+        font-weight: 750;
+      }
+
+      .runtime-list {
+        display: grid;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .runtime-list li {
+        position: relative;
+        padding-left: 24px;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .runtime-list li::before {
+        content: "";
+        position: absolute;
+        top: 0.68em;
+        left: 0;
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--accent-2);
+      }
+
+      .commands {
+        display: grid;
+        gap: 16px;
+      }
+
+      .command {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--surface);
+      }
+
+      .command-label {
+        margin: 0;
+        padding: 14px 16px;
+        color: var(--muted);
+        font-weight: 700;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .command-note {
+        margin: 0;
+        padding: 0 16px 14px;
+        color: var(--muted);
+        font-size: 14px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .command-note code {
+        display: inline-block;
+        padding: 4px 7px;
+        border: 1px solid #c7d2fe;
+        border-radius: 6px;
+        background: #eef2ff;
+        color: var(--accent);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 13px;
+      }
+
+      pre {
+        margin: 0;
+        padding: 18px;
+        overflow-x: auto;
+        background: var(--code-bg);
+        color: var(--code-text);
+        line-height: 1.55;
+      }
+
+      pre code {
+        white-space: pre;
+      }
+
+      .token-command {
+        color: #7dd3fc;
+      }
+
+      .token-option {
+        color: #fbbf24;
+      }
+
+      .token-url {
+        color: #86efac;
+      }
+
+      .token-pipe {
+        color: #f472b6;
+      }
+
+      .token-path {
+        color: #c4b5fd;
+      }
+
+      .token-arg {
+        color: #fca5a5;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+        border-bottom: 1px solid rgba(37, 99, 235, 0.28);
+        transition: color 160ms ease, border-color 160ms ease, text-shadow 160ms ease;
+        white-space: nowrap;
+      }
+
+      a:hover,
+      a:focus-visible {
+        color: var(--accent-2);
+        border-color: var(--accent-2);
+        text-shadow: 0 10px 28px rgba(37, 99, 235, 0.18);
+        outline: none;
+      }
+
+      footer {
+        padding: 24px 16px 0;
+        color: var(--muted);
+        text-align: center;
+        font-size: 15px;
+      }
+
+      @media (max-width: 820px) {
+        .hero {
+          min-height: 200px;
+          padding: 32px 28px 30px;
+        }
+
+        .hero::after {
+          left: 28px;
+          right: 28px;
+          bottom: 14px;
+        }
+
+        section {
+          padding: 34px 28px;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        h1 {
+          font-size: clamp(24px, 5.8vw, 36px);
+        }
+
+        .lead {
+          font-size: 17px;
+        }
+      }
+
+      @media (max-width: 520px) {
+        .page {
+          width: min(100vw - 24px, 1120px);
+          padding-top: 28px;
+        }
+
+        .hero {
+          min-height: 180px;
+          padding: 24px 20px 28px;
+        }
+
+        .hero::before {
+          width: 58%;
+          opacity: 0.72;
+        }
+
+        .hero::after {
+          left: 20px;
+          right: 20px;
+        }
+
+        section {
+          padding: 28px 20px;
+        }
+
+        h1 {
+          font-size: clamp(21px, 5.4vw, 28px);
+        }
+
+        .lead {
+          font-size: 13px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <main>
+        <div class="hero">
+          <div class="hero-content">
+            <h1>egret-web-server</h1>
+            <p class="lead"><strong>egret-web-server</strong> is a powerful and high-performance web server using egret-lang.</p>
+          </div>
+        </div>
+
+        <section>
+          <h2>Build &amp; Run</h2>
+          <div class="commands">
+            <div class="command">
+              <p class="command-label">Install egret-lang first</p>
+              <p class="command-note">Install script: <a href="https://egret-lang.org/install.sh"><code>https://egret-lang.org/install.sh</code></a></p>
+              <pre><code><span class="token-command">curl</span> <span class="token-option">-fsSL</span> <span class="token-url">https://egret-lang.org/install.sh</span> <span class="token-pipe">|</span> <span class="token-command">sh</span></code></pre>
+            </div>
+            <div class="command">
+              <p class="command-label">Build the server</p>
+              <pre><code><span class="token-command">cd</span> <span class="token-path">egret-web-server_source_directory</span>
+<span class="token-command">egret</span> <span class="token-arg">build</span></code></pre>
+            </div>
+            <div class="command">
+              <p class="command-label">Run after building</p>
+              <pre><code><span class="token-path">./build/egret-web-server</span> <span class="token-option">-c</span> <span class="token-path">./conf/web.conf</span></code></pre>
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <h2>Configuration Support</h2>
+          <div class="grid">
+            <div class="item">
+              <div class="item-title"><code>worker_processes</code></div>
+              <p>Worker process configuration for high-concurrency deployments.</p>
+            </div>
+            <div class="item">
+              <div class="item-title"><code>events { worker_connections }</code></div>
+              <p>Event settings for connection capacity and worker behavior.</p>
+            </div>
+            <div class="item">
+              <div class="item-title"><code>http { client_max_body_size keepalive_timeout gzip gzip_min_length server { ... } }</code></div>
+              <p>HTTP-level server tuning, compression, body limits, and virtual server blocks.</p>
+            </div>
+            <div class="item">
+              <div class="item-title"><code>server { listen server_name root index ssl_certificate ssl_certificate_key rewrite location }</code></div>
+              <p>Server blocks with listening sockets, roots, rewrites, locations, and TLS certificates.</p>
+            </div>
+            <div class="item">
+              <div class="item-title"><code>location { root alias index try_files proxy_pass proxy_set_header }</code></div>
+              <p>Location routing for static files, aliases, fallback paths, and reverse proxy headers.</p>
+            </div>
+            <div class="item">
+              <div class="item-title">nginx-compatible directives</div>
+              <p>Common directives such as <code>user</code>, <code>error_log</code>, <code>pid</code>, <code>include</code>, <code>sendfile</code>, <code>tcp_nopush</code>, <code>tcp_nodelay</code>, <code>types_hash_max_size</code>, <code>default_type</code>, <code>access_log</code>, <code>log_format</code>, <code>error_page</code>, and TLS session/cipher directives are parsed and safely skipped when they do not affect this example server.</p>
+            </div>
+            <div class="item">
+              <div class="item-title"><code>proxy_pass https://...</code></div>
+              <p>HTTPS upstreams are supported through <code>aio::tls</code>.</p>
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <h2>Runtime Model</h2>
+          <ul class="runtime-list">
+            <li>The parent process creates the listening socket first.</li>
+            <li>On Unix-like systems it forks worker processes, and each worker accepts from the inherited listening socket.</li>
+            <li>On Windows, where <code>fork</code> is not available, it falls back to one AIO worker in the current process.</li>
+            <li>Per-connection work is handled with AIO tasks.</li>
+            <li>Static text/json/js responses can be sent with <code>Content-Encoding: gzip</code> when the client advertises <code>Accept-Encoding: gzip</code>.</li>
+            <li>Multiple <code>server</code> blocks and multiple <code>listen</code> directives per <code>http</code> config can be parsed. Distinct HTTP/HTTPS sockets are started and duplicate listen sockets are skipped.</li>
+            <li>Simple nginx-style rewrites like <code>rewrite ^/p/(.*)$ /page.html?cid=$1 last;</code> are applied before location matching.</li>
+            <li>Server-side HTTPS uses runtime <code>aio::tls::listen</code>/<code>aio::tls::accept</code>, loads PEM certificate/key files, and performs the TLS handshake asynchronously. HTTPS upstream proxying works through <code>aio::tls::connect</code>.</li>
+          </ul>
+        </section>
+
+      </main>
+      <footer>
+        Powered By <a href="https://egret-lang.org">https://egret-lang.org</a>
+      </footer>
+    </div>
+  </body>
+</html>
