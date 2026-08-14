@@ -9,11 +9,18 @@ use strconv;
 use strings;
 use std;
 
+// In-memory HTTP response representation. Rendering is kept here so all
+// handlers emit a consistent status line, content headers, and connection mode.
 class HttpResponse {
+    // Numeric HTTP status code.
     var code: Int;
+    // Value for the Content-Type header.
     var content_type: String;
+    // Response body bytes.
     var body: String;
+    // Whether the response should keep the client connection open.
     var keep_alive: Bool;
+    // Optional raw headers appended before Content-Length.
     var extra_headers: String;
 
     func init(self: server.HttpResponse, code: Int, content_type: String, body: String, keep_alive: Bool = false, extra_headers: String = "") -> Void {
@@ -24,6 +31,7 @@ class HttpResponse {
         self.extra_headers = extra_headers;
     }
 
+    // Maps supported status codes to reason phrases.
     func reason(self: server.HttpResponse) -> String {
         return match self.code {
             301 => "Moved Permanently",
@@ -36,6 +44,7 @@ class HttpResponse {
         };
     }
 
+    // Serializes the keep-alive decision into the Connection header.
     func connection_header(self: server.HttpResponse) -> String {
         return match self.keep_alive {
             true => "\r\nConnection: keep-alive\r\n\r\n",
@@ -43,6 +52,7 @@ class HttpResponse {
         };
     }
 
+    // Renders the full HTTP/1.1 response message.
     func render(self: server.HttpResponse) -> String {
         return "HTTP/1.1 " + strconv.itoa(self.code) + " " + self.reason()
         + "\r\nServer: egret-web-server\r\nContent-Type: " + self.content_type
@@ -56,8 +66,12 @@ class HttpResponse {
     }
 }
 
+// Lightweight request wrapper. It stores the raw request and delegates parsing
+// to HttpRequestParser so handlers can ask for method, path, headers, and body.
 class HttpRequest {
+    // Full request bytes as received from the client.
     var raw: String;
+    // Stateless parser shared by all accessors.
     var parser: server.HttpRequestParser;
 
     func init(self: server.HttpRequest, raw: String) -> Void {
@@ -65,10 +79,12 @@ class HttpRequest {
         self.parser = new server.HttpRequestParser();
     }
 
+    // Path without query string.
     func path(self: server.HttpRequest) -> String {
         return self.parser.path(self.raw);
     }
 
+    // Original request target from the request line.
     func target(self: server.HttpRequest) -> String {
         return self.parser.target(self.raw);
     }
@@ -105,18 +121,22 @@ class HttpRequest {
         return self.parser.host(self.raw);
     }
 
+    // Convenience wrapper for gzip negotiation.
     func accepts_gzip(self: server.HttpRequest) -> Bool {
         return (new server.GzipRequestCapabilities()).accepts_gzip(self.raw);
     }
 }
 
+// Transport interface implemented by TCP and TLS connection adapters.
 norm HttpConn<T> {
     async func http_conn_recv(self: T, max_bytes: Int, timeout_ms: Int) -> String, ErrCode;
     async func http_conn_send(self: T, data: String, timeout_ms: Int) -> Int, ErrCode;
     func http_conn_close(self: T) -> Void;
 }
 
+// Plain TCP implementation of HttpConn.
 class TcpHttpConn {
+    // Socket file descriptor owned by the connection wrapper.
     var fd: Int;
 
     func init(self: server.TcpHttpConn, fd: Int) -> Void {
@@ -140,7 +160,9 @@ norm impl HttpConn<server.TcpHttpConn> {
     }
 }
 
+// TLS implementation of HttpConn.
 class TlsHttpConn {
+    // TLS socket file descriptor owned by the connection wrapper.
     var fd: Int;
 
     func init(self: server.TlsHttpConn, fd: Int) -> Void {
@@ -164,9 +186,14 @@ norm impl HttpConn<server.TlsHttpConn> {
     }
 }
 
+// Runtime transport selector for client or upstream HTTP I/O. It hides whether
+// the fd is plain TCP or TLS and applies the configured timeout everywhere.
 class HttpTransport {
+    // Socket/TLS file descriptor.
     var fd: Int;
+    // True when fd must be accessed through aio.tls.
     var is_tls: Bool;
+    // Per-operation timeout in milliseconds.
     var timeout_ms: Int;
 
     func init(self: server.HttpTransport, fd: Int, is_tls: Bool = false, timeout_ms: Int = DEFAULT_KEEPALIVE_TIMEOUT_MS) -> Void {
@@ -175,6 +202,7 @@ class HttpTransport {
         self.timeout_ms = timeout_ms;
     }
 
+    // Receives a complete HTTP request, including fixed-length or chunked body.
     async func recv_request(self: server.HttpTransport, max_total: Int) -> String {
         if self.is_tls {
             let tls_stream = new server.HttpConnStream<server.TlsHttpConn>(new server.TlsHttpConn(self.fd));
@@ -184,6 +212,7 @@ class HttpTransport {
         return await tcp_stream.recv_request(max_total, self.timeout_ms);
     }
 
+    // Sends the complete response or proxied request.
     async func send_all(self: server.HttpTransport, data: String) -> Int {
         if self.is_tls {
             let tls_stream = new server.HttpConnStream<server.TlsHttpConn>(new server.TlsHttpConn(self.fd));
@@ -193,6 +222,7 @@ class HttpTransport {
         return await tcp_stream.send_all(data, self.timeout_ms);
     }
 
+    // Reads until EOF or max_total, used for upstream proxy responses.
     async func recv_all(self: server.HttpTransport, max_total: Int) -> String {
         if self.is_tls {
             let tls_stream = new server.HttpConnStream<server.TlsHttpConn>(new server.TlsHttpConn(self.fd));
@@ -202,6 +232,7 @@ class HttpTransport {
         return await tcp_stream.recv_all(max_total, self.timeout_ms);
     }
 
+    // Closes the selected transport.
     func close(self: server.HttpTransport) -> Void {
         if self.is_tls {
             let tls_stream = new server.HttpConnStream<server.TlsHttpConn>(new server.TlsHttpConn(self.fd));
@@ -213,6 +244,8 @@ class HttpTransport {
     }
 }
 
+// Factory for common response shapes used across static, proxy, FastCGI, and
+// error paths.
 class HttpResponseFactory {
     func init(self: server.HttpResponseFactory) -> Void {
     }
@@ -235,10 +268,12 @@ class HttpResponseFactory {
     }
 }
 
+// Hand-written HTTP/1.1 parser for request lines, headers, and bodies.
 class HttpRequestParser {
     func init(self: server.HttpRequestParser) -> Void {
     }
 
+    // Extracts the path component and strips any query string.
     func path(self: server.HttpRequestParser, req: String) -> String {
         let method_end = strings.find_substr(req, " ");
         if method_end < 0 {
@@ -252,6 +287,7 @@ class HttpRequestParser {
         return (new server.ServerUtil()).clean_path(substr(rest, 0, target_end));
     }
 
+    // Extracts the raw request target.
     func target(self: server.HttpRequestParser, req: String) -> String {
         let method_end = strings.find_substr(req, " ");
         if method_end < 0 {
@@ -265,6 +301,7 @@ class HttpRequestParser {
         return substr(rest, 0, target_end);
     }
 
+    // Extracts the request method.
     func method(self: server.HttpRequestParser, req: String) -> String {
         let method_end = strings.find_substr(req, " ");
         if method_end < 0 {
@@ -273,6 +310,7 @@ class HttpRequestParser {
         return substr(req, 0, method_end);
     }
 
+    // Extracts the protocol token from the request line.
     func protocol(self: server.HttpRequestParser, req: String) -> String {
         let first_end = strings.find_substr(req, "\r\n");
         let first = req;
@@ -286,6 +324,7 @@ class HttpRequestParser {
         return substr(first, p + 1, len(first) - (p + 1));
     }
 
+    // Extracts the query including the leading question mark.
     func query(self: server.HttpRequestParser, req: String) -> String {
         let method_end = strings.find_substr(req, " ");
         if method_end < 0 {
@@ -304,6 +343,7 @@ class HttpRequestParser {
         return substr(target, q, len(target) - q);
     }
 
+    // Extracts the query without the leading question mark.
     func query_string(self: server.HttpRequestParser, req: String) -> String {
         let q = self.query(req);
         if len(q) == 0 {
@@ -312,6 +352,7 @@ class HttpRequestParser {
         return substr(q, 1, len(q) - 1);
     }
 
+    // Case-insensitive header lookup. key_lc must be lowercase.
     func header(self: server.HttpRequestParser, req: String, key_lc: String) -> String {
         let marker = "\r\n" + key_lc + ":";
         let p = strings.find_substr_ascii_case(req, marker);
@@ -327,15 +368,18 @@ class HttpRequestParser {
         return strings.trim_space(substr(rest, 0, e));
     }
 
+    // Parses Content-Length and returns zero when absent or invalid.
     func content_length(self: server.HttpRequestParser, req: String) -> Int {
         return (new server.ServerUtil()).atoi_or(self.header(req, "content-length"), 0);
     }
 
+    // Detects Transfer-Encoding: chunked.
     func is_chunked(self: server.HttpRequestParser, req: String) -> Bool {
         let te = strings.to_lower_ascii(self.header(req, "transfer-encoding"));
         return strings.contains(te, "chunked");
     }
 
+    // Returns bytes after the CRLFCRLF header separator.
     func raw_body(self: server.HttpRequestParser, req: String) -> String {
         let sep = strings.find_substr(req, "\r\n\r\n");
         if sep < 0 {
@@ -344,6 +388,8 @@ class HttpRequestParser {
         return substr(req, sep + 4, len(req) - (sep + 4));
     }
 
+    // Checks whether the buffered chunked body contains the terminating
+    // zero-size chunk and its trailing CRLF.
     func chunked_body_complete(self: server.HttpRequestParser, body: String) -> Bool {
         let pos = 0;
         loop pos < len(body) {
@@ -371,6 +417,7 @@ class HttpRequestParser {
         return false;
     }
 
+    // Decodes a chunked request body into contiguous payload bytes.
     func decode_chunked_body(self: server.HttpRequestParser, body: String) -> String {
         let out = "";
         let pos = 0;
@@ -396,6 +443,7 @@ class HttpRequestParser {
         return out;
     }
 
+    // Returns the decoded body for chunked requests, otherwise the raw body.
     func body(self: server.HttpRequestParser, req: String) -> String {
         let body = self.raw_body(req);
         if self.is_chunked(req) {
@@ -404,6 +452,7 @@ class HttpRequestParser {
         return body;
     }
 
+    // Implements HTTP/1.1 keep-alive rules plus explicit Connection headers.
     func keep_alive(self: server.HttpRequestParser, req: String) -> Bool {
         if strings.find_substr_ascii_case(req, "\r\nconnection: close") >= 0 {
             return false;
@@ -414,6 +463,8 @@ class HttpRequestParser {
         return true;
     }
 
+    // Normalizes Host for virtual-host matching by trimming, lowercasing, and
+    // removing a non-IPv6 port suffix.
     func normalize_host_name(self: server.HttpRequestParser, host: String) -> String {
         let h = strings.to_lower_ascii(strings.trim_space(host));
         if len(h) == 0 {
@@ -429,6 +480,7 @@ class HttpRequestParser {
         return h;
     }
 
+    // Extracts and normalizes the Host header.
     func host(self: server.HttpRequestParser, req: String) -> String {
         let marker = "\r\nhost:";
         let p = strings.find_substr_ascii_case(req, marker);
@@ -445,13 +497,18 @@ class HttpRequestParser {
     }
 }
 
+// Generic stream helper over HttpConn. It owns no socket itself; it only loops
+// reads/writes until a full request or response has been transferred.
 class HttpConnStream<T: server.HttpConn> {
+    // Underlying TCP or TLS adapter.
     var conn: T;
 
     func init(self: server.HttpConnStream<T>, conn: T) -> Void {
         self.conn = conn;
     }
 
+    // Receives headers first, then reads either chunked body or Content-Length
+    // bytes without exceeding max_total.
     async func recv_request(self: server.HttpConnStream<T>, max_total: Int, timeout_ms: Int) -> String {
         let parser = new server.HttpRequestParser();
         let req = await self.recv_until("\r\n\r\n", max_total, timeout_ms);
@@ -501,6 +558,7 @@ class HttpConnStream<T: server.HttpConn> {
         return req;
     }
 
+    // Reads until a marker is present, EOF happens, or the maximum size is hit.
     async func recv_until(self: server.HttpConnStream<T>, pat: String, max_total: Int, timeout_ms: Int) -> String {
         let buf = "";
         let done = false;
@@ -525,6 +583,7 @@ class HttpConnStream<T: server.HttpConn> {
         return buf;
     }
 
+    // Writes until all bytes have been accepted by the underlying transport.
     async func send_all(self: server.HttpConnStream<T>, data: String, timeout_ms: Int) -> Int {
         let off = 0;
         loop off < len(data) {
@@ -540,6 +599,7 @@ class HttpConnStream<T: server.HttpConn> {
         return 0;
     }
 
+    // Reads a raw stream until EOF or size limit. Used by reverse proxying.
     async func recv_all(self: server.HttpConnStream<T>, max_total: Int, timeout_ms: Int) -> String {
         let out = "";
         loop len(out) < max_total {
@@ -555,6 +615,7 @@ class HttpConnStream<T: server.HttpConn> {
         return out;
     }
 
+    // Closes the underlying transport adapter.
     func close(self: server.HttpConnStream<T>) -> Void {
         _ = server.HttpConn<T>.http_conn_close(self.conn);
     }

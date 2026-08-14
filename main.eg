@@ -1,8 +1,12 @@
 // Copyright (c) 2026 Egret-lang.org
 // SPDX-License-Identifier: MIT
 
+// Process entry point for the egret-web-server executable.
+// The real CLI and server lifecycle live in server.WebServerCli so the
+// top-level file stays small and only wires argv into the server module.
 use server;
 
+// Starts the web server CLI and returns its process exit code.
 async func main(argc: Int, argv: Int) -> Int {
     return await (new server.WebServerCli()).run(argc, argv);
 }

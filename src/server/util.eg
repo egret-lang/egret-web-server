@@ -8,6 +8,9 @@ use strconv;
 use strings;
 use std;
 
+// Shared default values used by config parsing and runtime request handling.
+// Text constants keep the parsed config map string-only; numeric constants are
+// used once values are consumed by network, timeout, and worker code.
 internal const DEFAULT_WORKER_PROCESSES_TEXT: String = "1";
 internal const DEFAULT_WORKER_CONNECTIONS_TEXT: String = "1024";
 internal const DEFAULT_WORKER_CONNECTIONS: Int = 1024;
@@ -40,10 +43,14 @@ internal const DEFAULT_ACCEPT_TIMEOUT_MS: Int = 1000;
 internal const DEFAULT_KEEPALIVE_REQUEST_LIMIT: Int = 1000;
 internal const DEFAULT_GC_MAX_ADAPTIVE_THRESHOLD_BYTES: Int = 67108864;
 
+// Small utility layer for config lookup, unit parsing, location matching, path
+// normalization, and MIME detection. Keeping this logic centralized prevents
+// subtle differences between static files, proxying, FastCGI, and vhost code.
 class ServerUtil {
     func init(self: server.ServerUtil) -> Void {
     }
 
+    // Parses an integer and falls back when the value is empty or invalid.
     func atoi_or(self: server.ServerUtil, s: String, def: Int) -> Int {
         if len(s) == 0 {
             return def;
@@ -59,6 +66,8 @@ class ServerUtil {
         return strconv.itoa(n);
     }
 
+    // Reads a string from the flat config map. The map stores every directive
+    // as a key/value pair, so callers must always provide a default.
     func cfg_get(self: server.ServerUtil, cfg: collections.Map<String, String>, key: String, def: String) -> String {
         if cfg.has(key) {
             return cfg.get(key);
@@ -70,6 +79,8 @@ class ServerUtil {
         return self.atoi_or(self.cfg_get(cfg, key, ""), def);
     }
 
+    // Builds a namespaced config key. Virtual hosts use bases such as
+    // "vhost.0", while the default server uses an empty base.
     func cfg_key_at(self: server.ServerUtil, base: String, key: String) -> String {
         if len(base) == 0 {
             return key;
@@ -85,6 +96,7 @@ class ServerUtil {
         return self.atoi_or(self.cfg_get_at(cfg, base, key, ""), def);
     }
 
+    // Parses nginx-style size literals like "16k", "1m", or "2g".
     func parse_size(self: server.ServerUtil, s: String, def: Int) -> Int {
         let raw = strings.trim(s);
         let n = len(raw);
@@ -113,6 +125,8 @@ class ServerUtil {
         return self.atoi_or(body, def) * mult;
     }
 
+    // Parses durations into milliseconds. Bare numbers are treated as seconds
+    // to match common web-server configuration syntax.
     func parse_time_ms(self: server.ServerUtil, s: String, def: Int) -> Int {
         let raw = strings.trim(s);
         let n = len(raw);
@@ -136,6 +150,8 @@ class ServerUtil {
         return substr(s, 0, len(prefix)) == prefix;
     }
 
+    // Extracts a suffix from simple regex locations such as "\.php$". The
+    // server intentionally supports only the subset it can match cheaply.
     func simple_regex_suffix(self: server.ServerUtil, pattern: String) -> String {
         if len(pattern) <= 1 {
             return "";
@@ -176,6 +192,9 @@ class ServerUtil {
         return false;
     }
 
+    // Implements location selection for a server or virtual-host config base:
+    // exact matches win immediately, regex suffix matches are accepted, and
+    // prefix locations use longest-prefix semantics.
     func match_loc_at(self: server.ServerUtil, cfg: collections.Map<String, String>, base: String, path: String) -> Int {
         let keys = new server.ConfigKeys();
         let n = self.cfg_int_at(cfg, base, "loc_count", 1);
@@ -202,6 +221,8 @@ class ServerUtil {
         return self.match_loc_at(cfg, "", path);
     }
 
+    // Removes query text, normalizes empty paths, and blocks parent traversal
+    // before any path is mapped to disk.
     func clean_path(self: server.ServerUtil, path: String) -> String {
         let p = path;
         let q = strings.find_substr(p, "?");
@@ -217,6 +238,7 @@ class ServerUtil {
         return p;
     }
 
+    // Joins a configured document root or alias with a request path.
     func join_path(self: server.ServerUtil, root: String, path: String) -> String {
         if len(path) > 0 && substr(path, 0, 1) == "/" {
             path = substr(path, 1, len(path) - 1);
@@ -230,6 +252,8 @@ class ServerUtil {
         return root + "/" + path;
     }
 
+    // Minimal MIME table used by static responses. Unknown file extensions are
+    // served as binary data.
     func mime(self: server.ServerUtil, path: String) -> String {
         let lc = strings.to_lower_ascii(path);
         if strings.contains(lc, ".html") {

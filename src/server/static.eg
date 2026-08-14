@@ -10,10 +10,15 @@ use strconv;
 use strings;
 use std;
 
+// Static file backend for locations without proxy_pass or FastCGI. It maps a
+// request path through root/alias/try_files rules, reads the file from disk, and
+// optionally gzip-encodes compressible responses.
 class StaticFileServer {
     func init(self: server.StaticFileServer) -> Void {
     }
 
+    // Expands a try_files candidate such as "$uri" or "$uri/" into a concrete
+    // disk path. Alias locations strip the matched prefix before joining.
     func try_path(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String, candidate: String) -> String {
         let util = new server.ServerUtil();
         let keys = new server.ConfigKeys();
@@ -37,6 +42,7 @@ class StaticFileServer {
         return util.join_path(util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".root"), util.cfg_get_at(cfg, cfg_base, "root", ".")), p);
     }
 
+    // Reads and serves a known disk file using the gzip policy from config.
     async func serve_disk_file(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: server.HttpRequest, disk: String, keep_alive: Bool) -> String {
         let util = new server.ServerUtil();
         let factory = new server.HttpResponseFactory();
@@ -54,6 +60,8 @@ class StaticFileServer {
         return factory.response_extra(200, content_type, identity_encoded.body, keep_alive, identity_encoded.extra_headers);
     }
 
+    // Serves a known disk file using explicit gzip inputs. This is used by the
+    // hot path after dispatch has already computed compression settings.
     async func serve_disk_file_with_policy(self: server.StaticFileServer, req: server.HttpRequest, disk: String, keep_alive: Bool, gzip_enabled: Bool, gzip_min_length: Int) -> String {
         let util = new server.ServerUtil();
         let factory = new server.HttpResponseFactory();
@@ -71,6 +79,8 @@ class StaticFileServer {
         return factory.response_extra(200, content_type, identity_encoded.body, keep_alive, identity_encoded.extra_headers);
     }
 
+    // Resolves the disk path without reading it. Request dispatch uses this to
+    // preflight static compression and choose the fastest response path.
     func resolve_disk(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String) -> String {
         let util = new server.ServerUtil();
         let keys = new server.ConfigKeys();
@@ -102,6 +112,8 @@ class StaticFileServer {
         return "";
     }
 
+    // Full static serving path: try configured candidates first, fall back to
+    // index.html for "/", and return a 404 when no file exists.
     async func serve(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: server.HttpRequest, loc: Int, path: String, keep_alive: Bool) -> String {
         let util = new server.ServerUtil();
         let keys = new server.ConfigKeys();

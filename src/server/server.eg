@@ -12,10 +12,12 @@ use runtime;
 use strings;
 use std;
 
+// Transport-aware connection closer used by ClientConnection.
 class ConnectionCloser {
     func init(self: server.ConnectionCloser) -> Void {
     }
 
+    // Closes the fd through the matching TCP or TLS API.
     func close(self: server.ConnectionCloser, fd: Int, is_tls: Bool) -> Void {
         if is_tls {
             _ = aio.tls.close(fd);
@@ -25,11 +27,17 @@ class ConnectionCloser {
     }
 }
 
+// Accepted client connection plus request/response transport state.
 class ClientConnection {
+    // Accepted socket or TLS file descriptor.
     var fd: Int;
+    // Whether this connection is TLS.
     var is_tls: Bool;
+    // I/O timeout used by the HTTP transport.
     var timeout_ms: Int;
+    // TLS SNI name captured at accept time.
     var sni: String;
+    // HTTP transport wrapper for this fd.
     var transport: server.HttpTransport;
 
     func init(self: server.ClientConnection, fd: Int, is_tls: Bool, timeout_ms: Int) -> Void {
@@ -43,28 +51,35 @@ class ClientConnection {
         }
     }
 
+    // Receives one complete request from the client.
     async func recv_request(self: server.ClientConnection, max_total: Int) -> String {
         return await self.transport.recv_request(max_total);
     }
 
+    // Sends one complete response to the client.
     async func send(self: server.ClientConnection, data: String) -> Int {
         return await self.transport.send_all(data);
     }
 
+    // Closes the connection.
     func close(self: server.ClientConnection) -> Void {
         _ = self.transport.close();
     }
 }
 
+// Builds listener maps and stores virtual-host snapshots for shared bind
+// addresses. Multiple server blocks can share one 0.0.0.0:443 listener.
 class ListenerRegistry {
     func init(self: server.ListenerRegistry) -> Void {
     }
 
+    // Key that groups configs by network bind address and TLS mode.
     func bind_key_for(self: server.ListenerRegistry, cfg: collections.Map<String, String>) -> String {
         let util = new server.ServerUtil();
         return util.cfg_get(cfg, "listen_host", DEFAULT_LISTEN_HOST) + "." + util.cfg_get(cfg, "listen_port", DEFAULT_LISTEN_PORT_TEXT) + "." + util.cfg_get(cfg, "https_enabled", DEFAULT_HTTPS_ENABLED);
     }
 
+    // Checks whether a parsed server config contains a given server_name.
     func server_name_matches(self: server.ListenerRegistry, cfg: collections.Map<String, String>, name: String) -> Bool {
         let host = (new server.HttpRequestParser()).normalize_host_name(name);
         if len(host) == 0 {
@@ -77,6 +92,7 @@ class ListenerRegistry {
         return strings.contains(util.cfg_get(cfg, "server_names", DEFAULT_SERVER_NAMES), "|" + host + "|");
     }
 
+    // Checks whether a listener already has a vhost for the given name.
     func listener_has_vhost_name(self: server.ListenerRegistry, listener: collections.Map<String, String>, name: String) -> Bool {
         let host = (new server.HttpRequestParser()).normalize_host_name(name);
         if len(host) == 0 {
@@ -94,6 +110,7 @@ class ListenerRegistry {
         return false;
     }
 
+    // Records a host name on HTTP listeners that should redirect to HTTPS.
     func add_https_redirect_name(self: server.ListenerRegistry, listener: collections.Map<String, String>, name: String) -> Void {
         let host = (new server.HttpRequestParser()).normalize_host_name(name);
         if len(host) == 0 {
@@ -113,11 +130,13 @@ class ListenerRegistry {
         _ = listener.set("https_redirect_names", util.cfg_get(listener, "https_redirect_names", "|") + host + "|");
     }
 
+    // Key helper for vhost.N.* fields inside listener maps.
     func vhost_key(self: server.ListenerRegistry, idx: Int, suffix: String) -> String {
         let util = new server.ServerUtil();
         return "vhost." + util.itoa(idx) + suffix;
     }
 
+    // Copies a parsed server config into the listener as one virtual host.
     func store_vhost(self: server.ListenerRegistry, listener: collections.Map<String, String>, src: collections.Map<String, String>) -> Void {
         let util = new server.ServerUtil();
         let keys = new server.ConfigKeys();
@@ -243,6 +262,7 @@ class ListenerRegistry {
         _ = listener.set("vhost_count", util.itoa(idx + 1));
     }
 
+    // Creates a listener map and seeds it with the first vhost.
     func new_listener(self: server.ListenerRegistry, scfg: collections.Map<String, String>, bind_key: String) -> collections.Map<String, String> {
         let util = new server.ServerUtil();
         let l = new collections.Map<String, String>();
@@ -265,16 +285,19 @@ class ListenerRegistry {
         return l;
     }
 
+    // True when the listener is configured for TLS.
     func is_https_listener(self: server.ListenerRegistry, listener: collections.Map<String, String>) -> Bool {
         let util = new server.ServerUtil();
         return util.cfg_get(listener, "https_enabled", "0") == "1";
     }
 
+    // Returns whether a vhost should contribute HTTPS redirect hostnames.
     func vhost_allows_https_redirect(self: server.ListenerRegistry, listener: collections.Map<String, String>, vhost_idx: Int) -> Bool {
         let util = new server.ServerUtil();
         return util.cfg_get(listener, self.vhost_key(vhost_idx, ".https_redirect"), DEFAULT_HTTPS_REDIRECT) != DISABLED_TEXT;
     }
 
+    // Adds one HTTPS vhost name to all matching HTTP listeners.
     func add_https_redirect_name_to_http_listeners(self: server.ListenerRegistry, plan: server.ListenerPlan, name: String) -> Void {
         loop (let li = 0; li < plan.listener_count; li += 1) {
             let listener = plan.load_listener(li);
@@ -289,6 +312,7 @@ class ListenerRegistry {
         }
     }
 
+    // Copies redirect names from one HTTPS vhost.
     func add_https_redirect_names_from_vhost(self: server.ListenerRegistry, plan: server.ListenerPlan, listener: collections.Map<String, String>, vhost_idx: Int) -> Void {
         if !self.vhost_allows_https_redirect(listener, vhost_idx) {
             return;
@@ -301,6 +325,8 @@ class ListenerRegistry {
         }
     }
 
+    // After all listeners are built, marks HTTP listeners that should redirect
+    // hosts also served by HTTPS.
     func add_https_redirects(self: server.ListenerRegistry, plan: server.ListenerPlan) -> Void {
         loop (let hi = 0; hi < plan.listener_count; hi += 1) {
             let listener = plan.load_listener(hi);
@@ -315,6 +341,7 @@ class ListenerRegistry {
         }
     }
 
+    // Merges vhost lists when duplicate listener maps are compacted.
     func merge_vhosts(self: server.ListenerRegistry, dst: collections.Map<String, String>, src: collections.Map<String, String>) -> Void {
         let util = new server.ServerUtil();
         loop (let vi = 0; vi < util.cfg_int(src, "vhost_count", 0); vi += 1) {
@@ -323,6 +350,8 @@ class ListenerRegistry {
     }
 }
 
+// Manual map clone helper used when listener configs must be copied before
+// worker ownership changes.
 class MapCloner {
     func init(self: server.MapCloner) -> Void {
     }
@@ -339,7 +368,9 @@ class MapCloner {
     }
 }
 
+// Vector entry wrapper for listener maps.
 class ListenerEntry {
+    // Listener configuration map.
     var cfg: collections.Map<String, String>;
 
     func init(self: server.ListenerEntry, cfg: collections.Map<String, String>) -> Void {
@@ -350,11 +381,17 @@ class ListenerEntry {
     }
 }
 
+// Complete runtime listener plan derived from parsed config.
 class ListenerPlan {
+    // Listener entries, one per unique bind endpoint.
     var listeners: collections.Vector<server.ListenerEntry>;
+    // bind_key -> listener index.
     var listener_index: collections.Map<String, Int>;
+    // Number of active listeners.
     var listener_count: Int;
+    // Number of vhosts merged into already existing listeners.
     var shared_vhosts: Int;
+    // Helper for listener/vhost copy operations.
     var registry: server.ListenerRegistry;
 
     func init(self: server.ListenerPlan) -> Void {
@@ -365,6 +402,7 @@ class ListenerPlan {
         self.registry = new server.ListenerRegistry();
     }
 
+    // Looks up a listener by bind key.
     func find_listener(self: server.ListenerPlan, key: String) -> Int {
         if self.listener_index.has(key) {
             return self.listener_index.get(key);
@@ -372,11 +410,13 @@ class ListenerPlan {
         return -1;
     }
 
+    // Key helper for listener.N.* values.
     func key(self: server.ListenerPlan, idx: Int, suffix: String) -> String {
         let util = new server.ServerUtil();
         return "listener." + util.itoa(idx) + suffix;
     }
 
+    // Copies a value between prefixed maps when rebuilding listener entries.
     func copy_prefixed(self: server.ListenerPlan, dst: collections.Map<String, String>, dst_prefix: String, src: collections.Map<String, String>, src_prefix: String, suffix: String, def: String) -> Void {
         let dst_key = dst_prefix + suffix;
         let src_key = src_prefix + suffix;
@@ -390,6 +430,7 @@ class ListenerPlan {
         _ = dst.set(dst_key, util.cfg_get(src, src_key, def));
     }
 
+    // Stores the modified listener map back into the vector entry.
     func save_listener(self: server.ListenerPlan, idx: Int, l: collections.Map<String, String>) -> Void {
         if idx < self.listeners.len() {
             _ = self.listeners.set(idx, new server.ListenerEntry(l));
@@ -400,10 +441,12 @@ class ListenerPlan {
         _ = self.listener_index.set(util.cfg_get(l, "bind_key", ""), idx);
     }
 
+    // Loads a listener map by index.
     func load_listener(self: server.ListenerPlan, idx: Int) -> collections.Map<String, String> {
         return self.listeners.get_unchecked(idx).cfg;
     }
 
+    // Removes duplicate bind entries and merges their vhost lists.
     func compact_duplicates(self: server.ListenerPlan) -> Void {
         if self.listener_count <= 1 {
             return;
@@ -431,6 +474,7 @@ class ListenerPlan {
         self.listener_count = compact_count;
     }
 
+    // Adds one server/listener config to the plan.
     func add(self: server.ListenerPlan, scfg: collections.Map<String, String>) -> Void {
         let bind_key = self.registry.bind_key_for(scfg);
         let existing = self.find_listener(bind_key);
@@ -445,6 +489,7 @@ class ListenerPlan {
         }
     }
 
+    // Checks whether a server config has any HTTPS listener.
     func has_https_listener_config(self: server.ListenerPlan, cfg: collections.Map<String, String>) -> Bool {
         let util = new server.ServerUtil();
         let keys = new server.ConfigKeys();
@@ -458,6 +503,7 @@ class ListenerPlan {
         return false;
     }
 
+    // Builds the full plan from all parsed server blocks.
     func build(self: server.ListenerPlan, cfg: collections.Map<String, String>) -> Void {
         let util = new server.ServerUtil();
         let keys = new server.ConfigKeys();
@@ -474,7 +520,9 @@ class ListenerPlan {
     }
 }
 
+// Request-time router for HTTPS redirects and vhost base selection.
 class VirtualHostRouter {
+    // Listener map containing default config and vhost.N.* snapshots.
     var listener: collections.Map<String, String>;
 
     func init(self: server.VirtualHostRouter, listener: collections.Map<String, String>) -> Void {
@@ -484,6 +532,7 @@ class VirtualHostRouter {
     func deinit(self: server.VirtualHostRouter) -> Void {
     }
 
+    // Determines whether this HTTP request should be redirected to HTTPS.
     func should_redirect_https(self: server.VirtualHostRouter, req: server.HttpRequest) -> Bool {
         let host = req.host();
         if len(host) == 0 {
@@ -493,20 +542,28 @@ class VirtualHostRouter {
         return strings.contains(util.cfg_get(self.listener, "https_redirect_names", "|"), "|" + host + "|");
     }
 
+    // Builds the HTTPS redirect URL.
     func redirect_url(self: server.VirtualHostRouter, req: server.HttpRequest) -> String {
         return "https://" + req.host() + req.path();
     }
 
+    // Selects the config base for the request Host or TLS SNI.
     func select_base(self: server.VirtualHostRouter, req: server.HttpRequest, sni: String) -> String {
         return (new server.VirtualHostSelector(self.listener)).select_vhost_base(req, sni);
     }
 }
 
+// Immutable request handling context passed into concrete handlers.
 class RequestContext {
+    // Matched location index.
     var loc: Int;
+    // Parsed HTTP request.
     var req: server.HttpRequest;
+    // Rewritten request path.
     var path: String;
+    // Final keep-alive decision.
     var keep_alive: Bool;
+    // Client connection, needed by FastCGI peer variables.
     var conn: server.ClientConnection;
 
     func init(self: server.RequestContext, loc: Int, req: server.HttpRequest, path: String, keep_alive: Bool, conn: server.ClientConnection) -> Void {
@@ -521,11 +578,14 @@ class RequestContext {
     }
 }
 
+// Handler interface for redirect, static, proxy, and FastCGI backends.
 norm RequestHandler<T> {
     async func handle_request(self: T, cfg: collections.Map<String, String>, cfg_base: String, ctx: server.RequestContext) -> String;
 }
 
+// Handler that returns an HTTP redirect response.
 class RedirectRequestHandler {
+    // Target URL for the Location header.
     var location: String;
 
     func init(self: server.RedirectRequestHandler, location: String) -> Void {
@@ -543,6 +603,7 @@ norm impl RequestHandler<server.RedirectRequestHandler> {
     }
 }
 
+// Handler that serves files from disk.
 class StaticRequestHandler {
     func init(self: server.StaticRequestHandler) -> Void {
     }
@@ -557,8 +618,11 @@ norm impl RequestHandler<server.StaticRequestHandler> {
     }
 }
 
+// Handler that forwards the request to proxy_pass.
 class ProxyRequestHandler {
+    // Reverse proxy implementation.
     var proxy: server.ReverseProxy;
+    // Configured proxy_pass target.
     var proxy_pass: String;
 
     func init(self: server.ProxyRequestHandler, proxy_pass: String) -> Void {
@@ -576,7 +640,9 @@ norm impl RequestHandler<server.ProxyRequestHandler> {
     }
 }
 
+// Handler that forwards the request to FastCGI/PHP-FPM.
 class FastcgiRequestHandler {
+    // Configured fastcgi_pass target.
     var fastcgi_pass: String;
 
     func init(self: server.FastcgiRequestHandler, fastcgi_pass: String) -> Void {
@@ -593,7 +659,10 @@ norm impl RequestHandler<server.FastcgiRequestHandler> {
     }
 }
 
+// Central request dispatcher. It applies redirects, selects the vhost, applies
+// rewrites, matches the location, and delegates to the chosen backend.
 class RequestDispatcher {
+    // Per-request keep-alive decision used by generated responses.
     var keep_alive: Bool;
 
     func init(self: server.RequestDispatcher) -> Void {
@@ -603,6 +672,7 @@ class RequestDispatcher {
     func deinit(self: server.RequestDispatcher) -> Void {
     }
 
+    // Dispatches one parsed request against the listener map.
     async func dispatch(self: server.RequestDispatcher, listener: collections.Map<String, String>, conn: server.ClientConnection, req: server.HttpRequest, allow_keep_alive: Bool = true) -> String {
         let util = new server.ServerUtil();
         let keys = new server.ConfigKeys();
@@ -643,8 +713,12 @@ class RequestDispatcher {
     }
 }
 
+// Lower-level virtual-host selector retained for code paths that need to copy
+// one vhost into a standalone config map.
 class VirtualHostSelector {
+    // Listener map containing virtual-host snapshots.
     var listener: collections.Map<String, String>;
+    // Shared key helper for vhost fields.
     var registry: server.ListenerRegistry;
 
     func init(self: server.VirtualHostSelector, listener: collections.Map<String, String>) -> Void {
@@ -655,6 +729,7 @@ class VirtualHostSelector {
     func deinit(self: server.VirtualHostSelector) -> Void {
     }
 
+    // Checks a host name against one vhost server_name list.
     func vhost_matches(self: server.VirtualHostSelector, idx: Int, name: String) -> Bool {
         let host = (new server.HttpRequestParser()).normalize_host_name(name);
         if len(host) == 0 {
@@ -668,6 +743,7 @@ class VirtualHostSelector {
         return strings.contains(util.cfg_get(self.listener, registry.vhost_key(idx, ".server_names"), DEFAULT_SERVER_NAMES), "|" + host + "|");
     }
 
+    // Copies one vhost snapshot into a normal server config map.
     func copy_vhost_config(self: server.VirtualHostSelector, idx: Int) -> collections.Map<String, String> {
         let util = new server.ServerUtil();
         let keys = new server.ConfigKeys();
@@ -735,10 +811,12 @@ class VirtualHostSelector {
         return out;
     }
 
+    // Returns the config-base prefix for an in-listener vhost.
     func vhost_base(self: server.VirtualHostSelector, idx: Int) -> String {
         return self.registry.vhost_key(idx, "");
     }
 
+    // Selects vhost by Host first, then by TLS SNI, then defaults to listener.
     func select_vhost_base(self: server.VirtualHostSelector, req: server.HttpRequest, sni: String) -> String {
         let util = new server.ServerUtil();
         let host = req.host();
@@ -765,10 +843,13 @@ class VirtualHostSelector {
     }
 }
 
+// Per-client task used by worker_loop. It owns the accepted fd until the
+// keep-alive loop finishes or an error closes the connection.
 class ClientRequestTask {
     func init(self: server.ClientRequestTask) -> Void {
     }
 
+    // Duplicates redirect check for the older direct path.
     func should_redirect_https(self: server.ClientRequestTask, listener: collections.Map<String, String>, req: server.HttpRequest) -> Bool {
         let host = req.host();
         if len(host) == 0 {
@@ -778,10 +859,12 @@ class ClientRequestTask {
         return strings.contains(util.cfg_get(listener, "https_redirect_names", "|"), "|" + host + "|");
     }
 
+    // Builds HTTPS redirect URL for the older direct path.
     func redirect_url(self: server.ClientRequestTask, req: server.HttpRequest) -> String {
         return "https://" + req.host() + req.path();
     }
 
+    // Checks whether a vhost matches a host name.
     func vhost_matches(self: server.ClientRequestTask, listener: collections.Map<String, String>, idx: Int, name: String) -> Bool {
         let host = (new server.HttpRequestParser()).normalize_host_name(name);
         if len(host) == 0 || host == DEFAULT_SERVER_NAME {
@@ -792,10 +875,12 @@ class ClientRequestTask {
         return strings.contains(util.cfg_get(listener, registry.vhost_key(idx, ".server_names"), DEFAULT_SERVER_NAMES), "|" + host + "|");
     }
 
+    // Returns the vhost config-base prefix.
     func vhost_base(self: server.ClientRequestTask, idx: Int) -> String {
         return (new server.ListenerRegistry()).vhost_key(idx, "");
     }
 
+    // Selects request config base by Host header or TLS SNI.
     func select_base(self: server.ClientRequestTask, listener: collections.Map<String, String>, req: server.HttpRequest, sni: String) -> String {
         let util = new server.ServerUtil();
         let host = req.host();
@@ -820,6 +905,8 @@ class ClientRequestTask {
         return "";
     }
 
+    // Handles a client connection, including repeated requests on keep-alive
+    // connections and static fast-path compression checks.
     async func handle(self: server.ClientRequestTask, listener: collections.Map<String, String>, is_tls: Bool, cfd: Int) -> Int {
         let util = new server.ServerUtil();
         let max_body = util.cfg_int(listener, "client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE);
@@ -883,9 +970,13 @@ class ClientRequestTask {
     }
 }
 
+// One listening socket and its associated listener config.
 class ServerListener {
+    // Listener config map.
     var listener: collections.Map<String, String>;
+    // Whether the socket accepts TLS clients.
     var is_tls: Bool;
+    // Listening fd after open().
     var listen_fd: Int;
 
     func init(self: server.ServerListener, listener: collections.Map<String, String>) -> Void {
@@ -898,6 +989,7 @@ class ServerListener {
     func deinit(self: server.ServerListener) -> Void {
     }
 
+    // Creates the OS listening socket, using TLS listen when required.
     func listen_conn(self: server.ServerListener) -> Int, ErrCode {
         let util = new server.ServerUtil();
         if self.is_tls {
@@ -914,6 +1006,7 @@ class ServerListener {
         return tcp_listen_fd, tcp_listen_err;
     }
 
+    // Registers SNI certificates for virtual hosts on a TLS listener.
     func register_tls_server_certs(self: server.ServerListener) -> ErrCode {
         let util = new server.ServerUtil();
         let registry = new server.ListenerRegistry();
@@ -935,6 +1028,7 @@ class ServerListener {
         return OK;
     }
 
+    // Opens the listener and stores the resulting fd in the listener map.
     func open(self: server.ServerListener) -> ErrCode {
         let util = new server.ServerUtil();
         self.is_tls = util.cfg_get(self.listener, "https_enabled", "0") == "1";
@@ -962,6 +1056,7 @@ class ServerListener {
         return OK;
     }
 
+    // Closes the listening fd.
     func close(self: server.ServerListener) -> Void {
         let util = new server.ServerUtil();
         if self.listen_fd <= 0 {
@@ -974,6 +1069,7 @@ class ServerListener {
         }
     }
 
+    // Accepts one client connection.
     async func accept(self: server.ServerListener, timeout_ms: Int) -> Int, ErrCode {
         if self.is_tls {
             let cfd, err = await aio.tls.accept(self.listen_fd, timeout_ms);
@@ -983,6 +1079,7 @@ class ServerListener {
         return tcp_client_fd, tcp_accept_err;
     }
 
+    // Handles one accepted client through RequestDispatcher.
     async func handle(self: server.ServerListener, cfd: Int) -> Int {
         let util = new server.ServerUtil();
         let max_body = util.cfg_int(self.listener, "client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE);
@@ -1017,6 +1114,8 @@ class ServerListener {
         return handled;
     }
 
+    // Accept loop for one worker. It spawns per-client tasks, reaps completed
+    // futures, and periodically lets the runtime reclaim memory.
     async func worker_loop(self: server.ServerListener, max_requests: Int) -> Int {
         let util = new server.ServerUtil();
         let hs = new collections.Vector<Future(Int)>();
@@ -1074,6 +1173,7 @@ class ServerListener {
         return 0;
     }
 
+    // Opens the listener if needed and starts the worker loop.
     async func serve_open(self: server.ServerListener, max_requests: Int) -> Int {
         let util = new server.ServerUtil();
         if self.listen_fd <= 0 {
@@ -1087,9 +1187,14 @@ class ServerListener {
     }
 }
 
+// Full application lifecycle: build plan, open listeners, start workers, and
+// close resources when serving finishes.
 class WebServerApplication {
+    // Parsed global config.
     var cfg: collections.Map<String, String>;
+    // Optional request limit for tests or controlled runs.
     var max_requests: Int;
+    // Runtime listener/vhost plan.
     var plan: server.ListenerPlan;
 
     func init(self: server.WebServerApplication, cfg: collections.Map<String, String>, max_requests: Int) -> Void {
@@ -1098,6 +1203,7 @@ class WebServerApplication {
         self.plan = new server.ListenerPlan();
     }
 
+    // Opens all listener sockets before workers start.
     func open_listeners(self: server.WebServerApplication) -> Int {
         let util = new server.ServerUtil();
         _ = self.plan.build(self.cfg);
@@ -1129,12 +1235,14 @@ class WebServerApplication {
         return started;
     }
 
+    // Closes every opened listener.
     func close_listeners(self: server.WebServerApplication) -> Void {
         loop (let i = 0; i < self.plan.listener_count; i += 1) {
             (new server.ServerListener(self.plan.load_listener(i))).close();
         }
     }
 
+    // Runs one worker set in the current process.
     async func run_worker_set(self: server.WebServerApplication) -> Int {
         let hs = new collections.Vector<Future(Int)>();
         loop (let li = 0; li < self.plan.listener_count; li += 1) {
@@ -1153,6 +1261,8 @@ class WebServerApplication {
         return rc;
     }
 
+    // Serves using forked worker processes when configured, otherwise runs the
+    // worker set in the current process.
     async func serve(self: server.WebServerApplication) -> Int {
         let started = self.open_listeners();
         if started <= 0 {
@@ -1197,12 +1307,19 @@ class WebServerApplication {
     }
 }
 
+// Parsed command-line options for WebServerCli.
 class RunOptions {
+    // Config file path.
     var config_path: String;
+    // True for config validation only.
     var check_config: Bool;
+    // True when startup should print memory/listener stats.
     var memory_stats: Bool;
+    // Optional maximum number of accepted requests.
     var max_requests: Int;
+    // True when help was requested.
     var help: Bool;
+    // False when argv parsing found an invalid option.
     var ok: Bool;
 
     func init(self: server.RunOptions) -> Void {
@@ -1214,6 +1331,7 @@ class RunOptions {
         self.ok = true;
     }
 
+    // Parses supported CLI flags and records invalid input in ok.
     func parse(self: server.RunOptions, argc: Int, argv: Int) -> Void {
         let util = new server.ServerUtil();
         if argc <= 1 {
@@ -1271,10 +1389,12 @@ class RunOptions {
     }
 }
 
+// Runtime tuning hooks.
 class ServerRuntime {
     func init(self: server.ServerRuntime) -> Void {
     }
 
+    // Sets an adaptive GC ceiling suitable for long-running server workloads.
     func configure_gc(self: server.ServerRuntime) -> Void {
         _ = runtime.gc_set_threshold(DEFAULT_GC_MAX_ADAPTIVE_THRESHOLD_BYTES);
         _ = runtime.gc_set_max_adaptive_threshold_bytes(DEFAULT_GC_MAX_ADAPTIVE_THRESHOLD_BYTES);
@@ -1282,10 +1402,12 @@ class ServerRuntime {
     }
 }
 
+// Command-line facade for the executable.
 class WebServerCli {
     func init(self: server.WebServerCli) -> Void {
     }
 
+    // Prints command usage.
     func print_help(self: server.WebServerCli) -> Void {
         print("egret-web-server: A powerful and high-performance web server using egret-lang. Powered by egret-lang.org");
         print("Usage:");
@@ -1305,6 +1427,7 @@ class WebServerCli {
         print("  egret-web-server -c examples/egret-web-server/conf/https.conf --max-requests 1");
     }
 
+    // Prints derived listener stats and basic runtime memory usage.
     func print_memory_stats(self: server.WebServerCli, cfg: collections.Map<String, String>) -> Void {
         let util = new server.ServerUtil();
         let plan = new server.ListenerPlan();
@@ -1324,6 +1447,7 @@ class WebServerCli {
         print("  gc_effective_heap_bytes: " + util.itoa(runtime.gc_effective_heap_bytes()));
     }
 
+    // Parses options, loads config, optionally checks it, and starts serving.
     async func run(self: server.WebServerCli, argc: Int, argv: Int) -> Int {
         let opts = new server.RunOptions();
         _ = opts.parse(argc, argv);

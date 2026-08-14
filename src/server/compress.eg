@@ -8,6 +8,8 @@ use encoding;
 use strings;
 use std;
 
+// Helpers for writing gzip container fields. The gzip and deflate formats use
+// little-endian integers, so byte conversion is kept in one small internal type.
 internal class GzipBytes {
     func init(self: server.GzipBytes) -> Void {
     }
@@ -25,10 +27,16 @@ internal class GzipBytes {
     }
 }
 
+// Bit-level writer for DEFLATE blocks. Bits are accumulated least-significant
+// first, flushed one byte at a time, and padded by finish() when needed.
 internal class GzipBitWriter {
+    // Raw compressed bytes emitted so far.
     var out: String;
+    // Pending bit accumulator that has not yet reached a full byte.
     var bits: Int;
+    // Number of valid pending bits currently stored in bits.
     var bit_count: Int;
+    // Byte conversion helper used when flushing accumulated bits.
     var bytes: server.GzipBytes;
 
     func init(self: server.GzipBitWriter) -> Void {
@@ -38,6 +46,7 @@ internal class GzipBitWriter {
         self.bytes = new server.GzipBytes();
     }
 
+    // Writes count low bits from value using DEFLATE bit order.
     func write_bits(self: server.GzipBitWriter, value: Int, count: Int) -> Void {
         self.bits = self.bits | ((value & ((1 << count) - 1)) << self.bit_count);
         self.bit_count += count;
@@ -48,6 +57,7 @@ internal class GzipBitWriter {
         }
     }
 
+    // Flushes a final partial byte and returns the compressed payload.
     func finish(self: server.GzipBitWriter) -> String {
         if self.bit_count > 0 {
             self.out += self.bytes.byte_char(self.bits & 255);
@@ -58,8 +68,11 @@ internal class GzipBitWriter {
     }
 }
 
+// Best match result for the small LZ77 search used by the fixed-Huffman encoder.
 internal class GzipMatch {
+    // Number of bytes copied from previous data.
     var length: Int;
+    // Backward distance to the matching data.
     var distance: Int;
 
     func init(self: server.GzipMatch, length: Int = 0, distance: Int = 0) -> Void {
@@ -68,10 +81,13 @@ internal class GzipMatch {
     }
 }
 
+// Decides whether an HTTP response should be gzip-compressed.
 class GzipPolicy {
     func init(self: server.GzipPolicy) -> Void {
     }
 
+    // Requires gzip=on, a large enough body, client support, and a MIME type
+    // where compression is normally useful.
     func should_compress(self: server.GzipPolicy, cfg: collections.Map<String, String>, cfg_base: String, req: server.HttpRequest, content_type: String, body: String) -> Bool {
         let util = new server.ServerUtil();
         if util.cfg_get_at(cfg, cfg_base, "gzip", "off") != "on" {
@@ -86,6 +102,7 @@ class GzipPolicy {
         return self.compressible_type(content_type);
     }
 
+    // Avoids wasting CPU on already-compressed or unknown binary content.
     func compressible_type(self: server.GzipPolicy, content_type: String) -> Bool {
         let lc = strings.to_lower_ascii(content_type);
         if strings.contains(lc, "text/") {
@@ -104,8 +121,11 @@ class GzipPolicy {
     }
 }
 
+// HTTP response body plus headers that must be added because of encoding.
 class EncodedResponseBody {
+    // Body bytes after applying the selected response encoder.
     var body: String;
+    // Header text appended by HttpResponse.render(), including leading CRLF.
     var extra_headers: String;
 
     func init(self: server.EncodedResponseBody, body: String, extra_headers: String = "") -> Void {
@@ -114,10 +134,13 @@ class EncodedResponseBody {
     }
 }
 
+// Response-encoding abstraction so static serving can choose identity or gzip
+// without duplicating response assembly logic.
 norm ResponseEncoder<T> {
     func encode_response_body(self: T, req: server.HttpRequest, content_type: String, body: String) -> server.EncodedResponseBody;
 }
 
+// No-op encoder used when compression is disabled or not applicable.
 class IdentityResponseEncoder {
     func init(self: server.IdentityResponseEncoder) -> Void {
     }
@@ -129,7 +152,9 @@ norm impl ResponseEncoder<server.IdentityResponseEncoder> {
     }
 }
 
+// Gzip encoder that owns a codec instance and emits HTTP encoding headers.
 class GzipResponseEncoder {
+    // Stateful helper object that writes the gzip container and checksum.
     var codec: server.GzipCodec;
 
     func init(self: server.GzipResponseEncoder) -> Void {
@@ -143,10 +168,14 @@ norm impl ResponseEncoder<server.GzipResponseEncoder> {
     }
 }
 
+// Fixed-Huffman DEFLATE encoder support. It intentionally avoids dynamic
+// Huffman table generation, which keeps the implementation compact while still
+// producing standards-compliant gzip output.
 internal class GzipFixedHuffman {
     func init(self: server.GzipFixedHuffman) -> Void {
     }
 
+    // DEFLATE transmits Huffman codes with reversed bit order.
     func reverse_bits(self: server.GzipFixedHuffman, value: Int, count: Int) -> Int {
         let out = 0;
         loop (let i = 0; i < count; i += 1) {
@@ -155,6 +184,7 @@ internal class GzipFixedHuffman {
         return out;
     }
 
+    // Returns the canonical fixed-Huffman code for a literal/length symbol.
     func fixed_huffman_code(self: server.GzipFixedHuffman, symbol: Int) -> Int {
         if symbol <= 143 {
             return 48 + symbol;
@@ -168,6 +198,7 @@ internal class GzipFixedHuffman {
         return 192 + (symbol - 280);
     }
 
+    // Returns the number of bits used by the fixed-Huffman symbol range.
     func fixed_huffman_bits(self: server.GzipFixedHuffman, symbol: Int) -> Int {
         if symbol <= 143 {
             return 8;
@@ -181,11 +212,13 @@ internal class GzipFixedHuffman {
         return 8;
     }
 
+    // Emits a literal, end-of-block marker, or length symbol.
     func write_fixed_symbol(self: server.GzipFixedHuffman, bw: server.GzipBitWriter, symbol: Int) -> Void {
         let bit_count = self.fixed_huffman_bits(symbol);
         _ = bw.write_bits(self.reverse_bits(self.fixed_huffman_code(symbol), bit_count), bit_count);
     }
 
+    // Base length for DEFLATE length symbols 257..285.
     func length_base(self: server.GzipFixedHuffman, code: Int) -> Int {
         let base = match code {
             257 => 3, 258 => 4, 259 => 5, 260 => 6, 261 => 7, 262 => 8, 263 => 9, 264 => 10,
@@ -196,6 +229,7 @@ internal class GzipFixedHuffman {
         return base;
     }
 
+    // Number of extra length bits following a length symbol.
     func length_extra_bits(self: server.GzipFixedHuffman, code: Int) -> Int {
         if code <= 264 {
             return 0;
@@ -218,6 +252,7 @@ internal class GzipFixedHuffman {
         return 0;
     }
 
+    // Maps a match length to the nearest DEFLATE length symbol.
     func length_code(self: server.GzipFixedHuffman, length: Int) -> Int {
         if length >= 258 {
             return 285;
@@ -240,6 +275,7 @@ internal class GzipFixedHuffman {
         return 281 + ((length - 131) >> 5);
     }
 
+    // Base backward distance for DEFLATE distance symbols.
     func distance_base(self: server.GzipFixedHuffman, code: Int) -> Int {
         let base = match code {
             0 => 1, 1 => 2, 2 => 3, 3 => 4, 4 => 5, 5 => 7, 6 => 9, 7 => 13,
@@ -250,6 +286,7 @@ internal class GzipFixedHuffman {
         return base;
     }
 
+    // Number of extra distance bits following a distance symbol.
     func distance_extra_bits(self: server.GzipFixedHuffman, code: Int) -> Int {
         if code <= 3 {
             return 0;
@@ -257,6 +294,7 @@ internal class GzipFixedHuffman {
         return (code >> 1) - 1;
     }
 
+    // Maps a backward distance to a DEFLATE distance symbol.
     func distance_code(self: server.GzipFixedHuffman, distance: Int) -> Int {
         loop (let code = 0; code < 29; code += 1) {
             let next_base = self.distance_base(code + 1);
@@ -267,6 +305,7 @@ internal class GzipFixedHuffman {
         return 29;
     }
 
+    // Writes one LZ77 length/distance pair into the fixed-Huffman stream.
     func write_length_distance(self: server.GzipFixedHuffman, bw: server.GzipBitWriter, length: Int, distance: Int) -> Void {
         let lc = self.length_code(length);
         _ = self.write_fixed_symbol(bw, lc);
@@ -282,6 +321,8 @@ internal class GzipFixedHuffman {
         }
     }
 
+    // Naive bounded match search. The 2048-byte window caps CPU cost while
+    // still finding useful repetition in small HTML, JS, CSS, and JSON files.
     func find_match(self: server.GzipFixedHuffman, data: String, pos: Int) -> server.GzipMatch {
         let best_len = 0;
         let best_dist = 0;
@@ -315,8 +356,11 @@ internal class GzipFixedHuffman {
     }
 }
 
+// Produces DEFLATE blocks for the gzip container.
 internal class GzipDeflater {
+    // Fixed-Huffman helper for compressed blocks.
     var huffman: server.GzipFixedHuffman;
+    // Byte helper for uncompressed stored-block output.
     var bytes: server.GzipBytes;
 
     func init(self: server.GzipDeflater) -> Void {
@@ -324,6 +368,7 @@ internal class GzipDeflater {
         self.bytes = new server.GzipBytes();
     }
 
+    // Encodes one final fixed-Huffman DEFLATE block.
     func fixed(self: server.GzipDeflater, data: String) -> String {
         let bw = new server.GzipBitWriter();
         _ = bw.write_bits(1, 1);
@@ -343,6 +388,8 @@ internal class GzipDeflater {
         return bw.finish();
     }
 
+    // Encodes one or more stored DEFLATE blocks. The codec can choose this
+    // fallback when fixed-Huffman output is larger than the original bytes.
     func stored(self: server.GzipDeflater, data: String) -> String {
         let out = "";
         let off = 0;
@@ -368,10 +415,12 @@ internal class GzipDeflater {
     }
 }
 
+// CRC32 calculator for the gzip trailer.
 internal class GzipChecksum {
     func init(self: server.GzipChecksum) -> Void {
     }
 
+    // Standard reflected CRC32 using polynomial 0xedb88320.
     func crc32(self: server.GzipChecksum, data: String) -> Int {
         let crc = 4294967295;
         let i = 0;
@@ -390,7 +439,9 @@ internal class GzipChecksum {
     }
 }
 
+// Public gzip codec used by the static-file response encoder.
 class GzipCodec {
+    // Helpers for container bytes, DEFLATE payload, and trailer checksum.
     var bytes: server.GzipBytes;
     var deflater: server.GzipDeflater;
     var checksum: server.GzipChecksum;
@@ -401,6 +452,8 @@ class GzipCodec {
         self.checksum = new server.GzipChecksum();
     }
 
+    // Builds a full gzip member: header, selected DEFLATE payload, CRC32, and
+    // original input size.
     func encode(self: server.GzipCodec, data: String) -> String {
         let deflated = self.deflater.fixed(data);
         let stored = self.deflater.stored(data);
@@ -415,10 +468,12 @@ class GzipCodec {
     }
 }
 
+// Parser for request Accept-Encoding capabilities.
 class GzipRequestCapabilities {
     func init(self: server.GzipRequestCapabilities) -> Void {
     }
 
+    // Returns true only when the request explicitly advertises gzip support.
     func accepts_gzip(self: server.GzipRequestCapabilities, req: String) -> Bool {
         let lc = strings.to_lower_ascii(req);
         if strings.contains(lc, "\r\naccept-encoding:") {
