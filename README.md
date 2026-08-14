@@ -8,8 +8,13 @@ If you haven't installed egret-lang yet, please install it first:
 ```sh
 curl -fsSL https://egret-lang.org/install.sh | sh
 ```
+You can directly execute the script `build_and_run.sh` for one‑click compilation and execution：
+```sh
+./build_and_run.sh
+```
+Or perform compilation and execution step‑by‑step.
 
-Then build the server:
+First build the server:
 ```sh
 cd egret-web-server_source_directory
 egret build
