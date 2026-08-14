@@ -1,8 +1,8 @@
 # egret-web-server
 
-`egret-web-server` is a powerful and high-performance web server using egret-lang. Powered by https://egret-lang.org.
+`egret-web-server` is a powerful and high-performance web server using egret-lang and powered by https://egret-lang.org.
 
-Build & Run:
+## Build & Run:
 
 If you haven't installed egret-lang yet, please install it first.
 ```sh
@@ -21,7 +21,7 @@ After building, you can run the server with:
 ./build/egret-web-server -c ./conf/web.conf
 ```
 
-
+## Features
 It supports the common configuration shape:
 
 - `worker_processes`
@@ -32,7 +32,7 @@ It supports the common configuration shape:
 - common nginx directives such as `user`, `error_log`, `pid`, `include`, `sendfile`, `tcp_nopush`, `tcp_nodelay`, `types_hash_max_size`, `default_type`, `access_log`, `log_format`, `error_page`, and TLS session/cipher directives are parsed and safely skipped when they do not affect this example server.
 - `proxy_pass https://...` for HTTPS upstreams via `aio::tls`
 
-Runtime model:
+## Runtime model:
 
 - The parent process creates the listening socket first.
 - On Unix-like systems it forks worker processes, and each worker accepts from the inherited listening socket.
