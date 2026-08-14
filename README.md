@@ -10,6 +10,7 @@ curl -fsSL https://egret-lang.org/install.sh | sh
 ```
 You can directly execute the script `build_and_run.sh` for one‑click compilation and execution：
 ```sh
+cd egret-web-server_source_directory
 ./build_and_run.sh
 ```
 Or perform compilation and execution step‑by‑step.
