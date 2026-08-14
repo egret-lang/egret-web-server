@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Egret-lang.org
 // SPDX-License-Identifier: MIT
 
-module server;
+module web_server;
 
+use web_server;
 use collections;
 use fs;
 use strconv;
@@ -12,11 +13,11 @@ use std;
 // Tokenizes the nginx-like config file into words and structural symbols. The
 // parser works on this simple token stream instead of scanning raw text.
 class ConfigTokenizer {
-    func init(self: server.ConfigTokenizer) -> Void {
+    func init(self: web_server.ConfigTokenizer) -> Void {
     }
 
     // Recognizes whitespace separators.
-    func is_space(self: server.ConfigTokenizer, ch: String) -> Bool {
+    func is_space(self: web_server.ConfigTokenizer, ch: String) -> Bool {
         return match ch {
             " " => true,
             "\t" => true,
@@ -27,7 +28,7 @@ class ConfigTokenizer {
     }
 
     // Recognizes block and statement delimiters.
-    func is_sym(self: server.ConfigTokenizer, ch: String) -> Bool {
+    func is_sym(self: web_server.ConfigTokenizer, ch: String) -> Bool {
         return match ch {
             "{" => true,
             "}" => true,
@@ -37,7 +38,7 @@ class ConfigTokenizer {
     }
 
     // Produces tokens while preserving quoted strings and skipping # comments.
-    func tokenize(self: server.ConfigTokenizer, conf: String) -> collections.Vector<String> {
+    func tokenize(self: web_server.ConfigTokenizer, conf: String) -> collections.Vector<String> {
         let out = new collections.Vector<String>();
         let n = len(conf);
         let i = 0;
@@ -126,11 +127,11 @@ class ConfigTokenizer {
 
 // Cursor helpers for moving through the token stream safely.
 class ConfigCursor {
-    func init(self: server.ConfigCursor) -> Void {
+    func init(self: web_server.ConfigCursor) -> Void {
     }
 
     // Skips either a semicolon statement or a nested brace block.
-    func skip_stmt(self: server.ConfigCursor, ts: collections.Vector<String>, i: Int) -> Int {
+    func skip_stmt(self: web_server.ConfigCursor, ts: collections.Vector<String>, i: Int) -> Int {
         if i < 0 {
             i = 0;
         }
@@ -166,7 +167,7 @@ class ConfigCursor {
     }
 
     // Returns token i or a default when out of bounds.
-    func val(self: server.ConfigCursor, ts: collections.Vector<String>, i: Int, def: String) -> String {
+    func val(self: web_server.ConfigCursor, ts: collections.Vector<String>, i: Int, def: String) -> String {
         if i < 0 {
             return def;
         }
@@ -177,7 +178,7 @@ class ConfigCursor {
     }
 
     // Consumes tokens until the following semicolon.
-    func consume(self: server.ConfigCursor, ts: collections.Vector<String>, i: Int) -> Int {
+    func consume(self: web_server.ConfigCursor, ts: collections.Vector<String>, i: Int) -> Int {
         i += 2;
         if i >= 0 && i < ts.len() && ts.get(i) == ";" {
             return i + 1;
@@ -189,57 +190,57 @@ class ConfigCursor {
 // Centralized key naming for the flat config map. Nested server, location, and
 // rewrite data is represented by predictable dotted keys.
 class ConfigKeys {
-    func init(self: server.ConfigKeys) -> Void {
+    func init(self: web_server.ConfigKeys) -> Void {
     }
 
-    func loc_key(self: server.ConfigKeys, idx: Int, suffix: String) -> String {
+    func loc_key(self: web_server.ConfigKeys, idx: Int, suffix: String) -> String {
         return "loc." + strconv.itoa(idx) + suffix;
     }
 
-    func rewrite_key(self: server.ConfigKeys, idx: Int, suffix: String) -> String {
+    func rewrite_key(self: web_server.ConfigKeys, idx: Int, suffix: String) -> String {
         return "rewrite." + strconv.itoa(idx) + suffix;
     }
 
-    func server_key(self: server.ConfigKeys, server_idx: Int, suffix: String) -> String {
+    func server_key(self: web_server.ConfigKeys, server_idx: Int, suffix: String) -> String {
         return "server." + strconv.itoa(server_idx) + suffix;
     }
 
-    func server_loc_key(self: server.ConfigKeys, server_idx: Int, loc_idx: Int, suffix: String) -> String {
+    func server_loc_key(self: web_server.ConfigKeys, server_idx: Int, loc_idx: Int, suffix: String) -> String {
         return self.server_key(server_idx, ".loc." + strconv.itoa(loc_idx) + suffix);
     }
 
-    func server_rewrite_key(self: server.ConfigKeys, server_idx: Int, rewrite_idx: Int, suffix: String) -> String {
+    func server_rewrite_key(self: web_server.ConfigKeys, server_idx: Int, rewrite_idx: Int, suffix: String) -> String {
         return self.server_key(server_idx, ".rewrite." + strconv.itoa(rewrite_idx) + suffix);
     }
 
-    func listen_key(self: server.ConfigKeys, idx: Int, suffix: String) -> String {
+    func listen_key(self: web_server.ConfigKeys, idx: Int, suffix: String) -> String {
         return "listen." + strconv.itoa(idx) + suffix;
     }
 
-    func server_listen_key(self: server.ConfigKeys, server_idx: Int, listen_idx: Int, suffix: String) -> String {
+    func server_listen_key(self: web_server.ConfigKeys, server_idx: Int, listen_idx: Int, suffix: String) -> String {
         return self.server_key(server_idx, ".listen." + strconv.itoa(listen_idx) + suffix);
     }
 }
 
 // Main DSL parser for supported nginx-style directives. It writes normalized
-// values into a flat string map consumed by the runtime server.
+// values into a flat string map consumed by the runtime web_server.
 class ConfigDsl {
     // Shared utility functions for map lookup and parsing.
-    var util: server.ServerUtil;
+    var util: web_server.ServerUtil;
     // Token cursor helper.
-    var cursor: server.ConfigCursor;
+    var cursor: web_server.ConfigCursor;
     // Flat-map key builder.
-    var keys: server.ConfigKeys;
+    var keys: web_server.ConfigKeys;
 
-    func init(self: server.ConfigDsl) -> Void {
-        self.util = new server.ServerUtil();
-        self.cursor = new server.ConfigCursor();
-        self.keys = new server.ConfigKeys();
+    func init(self: web_server.ConfigDsl) -> Void {
+        self.util = new web_server.ServerUtil();
+        self.cursor = new web_server.ConfigCursor();
+        self.keys = new web_server.ConfigKeys();
     }
 
     // Escapes Unix socket paths so dots and slashes do not collide with the
     // config map key format.
-    func encode_socket_path(self: server.ConfigDsl, path: String) -> String {
+    func encode_socket_path(self: web_server.ConfigDsl, path: String) -> String {
         let out = "";
         loop (let i: Int = 0; i < len(path); i += 1) {
             let ch = substr(path, i, 1);
@@ -261,7 +262,7 @@ class ConfigDsl {
     }
 
     // Clears per-server scratch keys before parsing a new server block.
-    func reset_server_workspace(self: server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
+    func reset_server_workspace(self: web_server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
         _ = cfg.set("listen_host", DEFAULT_LISTEN_HOST);
         _ = cfg.set("listen_port", DEFAULT_LISTEN_PORT_TEXT);
         _ = cfg.set("listen_count", "0");
@@ -280,7 +281,7 @@ class ConfigDsl {
     }
 
     // Parses a listen address into temporary host/port fields.
-    func parse_listen_value(self: server.ConfigDsl, v: String, cfg: collections.Map<String, String>) -> Void {
+    func parse_listen_value(self: web_server.ConfigDsl, v: String, cfg: collections.Map<String, String>) -> Void {
         _ = cfg.set("__listen_host", DEFAULT_LISTEN_HOST);
         _ = cfg.set("__listen_port", DEFAULT_LISTEN_PORT_TEXT);
         if self.util.starts_with(v, "[") {
@@ -300,7 +301,7 @@ class ConfigDsl {
     }
 
     // Checks whether a listener with the same port/protocol already exists.
-    func listener_exists(self: server.ConfigDsl, cfg: collections.Map<String, String>, port: String, https: String) -> Bool {
+    func listener_exists(self: web_server.ConfigDsl, cfg: collections.Map<String, String>, port: String, https: String) -> Bool {
         let n = self.util.cfg_int(cfg, "listen_count", 0);
         let i = 0;
         loop i < n {
@@ -313,7 +314,7 @@ class ConfigDsl {
     }
 
     // Adds one listener entry to the current server workspace.
-    func add_listener(self: server.ConfigDsl, cfg: collections.Map<String, String>, host: String, port: String, https: String, backlog: String) -> Void {
+    func add_listener(self: web_server.ConfigDsl, cfg: collections.Map<String, String>, host: String, port: String, https: String, backlog: String) -> Void {
         if self.listener_exists(cfg, port, https) {
             return;
         }
@@ -334,7 +335,7 @@ class ConfigDsl {
     }
 
     // Adds a lowercased server_name and a pipe-delimited lookup set.
-    func add_server_name(self: server.ConfigDsl, cfg: collections.Map<String, String>, name: String) -> Void {
+    func add_server_name(self: web_server.ConfigDsl, cfg: collections.Map<String, String>, name: String) -> Void {
         if len(name) == 0 {
             return;
         }
@@ -353,7 +354,7 @@ class ConfigDsl {
     }
 
     // Parses one server_name directive with one or more names.
-    func parse_server_name_stmt(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+    func parse_server_name_stmt(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
         i += 1;
         loop i < ts.len() {
             let t = ts.get(i);
@@ -370,7 +371,7 @@ class ConfigDsl {
     }
 
     // Ensures each server has a fallback prefix "/" location.
-    func ensure_default_location(self: server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
+    func ensure_default_location(self: web_server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
         if self.util.cfg_int(cfg, "loc_count", 0) != 0 {
             return;
         }
@@ -390,9 +391,9 @@ class ConfigDsl {
         _ = cfg.set("loc_count", "1");
     }
 
-    // Saves the currently parsed server workspace under server.N.* keys so it
+    // Saves the currently parsed server workspace under web_server.N.* keys so it
     // can later be copied per listener.
-    func store_server_snapshot(self: server.ConfigDsl, cfg: collections.Map<String, String>, server_idx: Int) -> Void {
+    func store_server_snapshot(self: web_server.ConfigDsl, cfg: collections.Map<String, String>, server_idx: Int) -> Void {
         self.ensure_default_location(cfg);
         if self.util.cfg_int(cfg, "listen_count", 0) == 0 {
             self.add_listener(cfg, self.util.cfg_get(cfg, "listen_host", DEFAULT_LISTEN_HOST), DEFAULT_LISTEN_PORT_TEXT, self.util.cfg_get(cfg, "https_enabled", DEFAULT_HTTPS_ENABLED), self.util.cfg_get(cfg, "backlog", DEFAULT_BACKLOG_TEXT));
@@ -454,7 +455,7 @@ class ConfigDsl {
 
     // Builds the runtime config for one server/listener pair from a stored
     // server snapshot.
-    func copy_server_config(self: server.ConfigDsl, cfg: collections.Map<String, String>, server_idx: Int, listen_idx: Int) -> collections.Map<String, String> {
+    func copy_server_config(self: web_server.ConfigDsl, cfg: collections.Map<String, String>, server_idx: Int, listen_idx: Int) -> collections.Map<String, String> {
         let out = new collections.Map<String, String>();
         _ = out.set("worker_processes", self.util.cfg_get(cfg, "worker_processes", DEFAULT_WORKER_PROCESSES_TEXT));
         _ = out.set("worker_connections", self.util.cfg_get(cfg, "worker_connections", DEFAULT_WORKER_CONNECTIONS_TEXT));
@@ -517,7 +518,7 @@ class ConfigDsl {
     }
 
     // Parses legacy top-level listen values.
-    func parse_listen(self: server.ConfigDsl, v: String, cfg: collections.Map<String, String>) -> Void {
+    func parse_listen(self: web_server.ConfigDsl, v: String, cfg: collections.Map<String, String>) -> Void {
         if self.util.starts_with(v, "[") {
             let ipv6_port_sep = strings.last_index(v, ":");
             if ipv6_port_sep > 0 && self.util.cfg_get(cfg, "listen_port", DEFAULT_LISTEN_PORT_TEXT) == DEFAULT_LISTEN_PORT_TEXT {
@@ -535,7 +536,7 @@ class ConfigDsl {
     }
 
     // Scans a server block to decide whether its listen directives imply TLS.
-    func server_block_has_tls(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int) -> Bool {
+    func server_block_has_tls(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int) -> Bool {
         if i >= ts.len() {
             return false;
         }
@@ -583,7 +584,7 @@ class ConfigDsl {
     }
 
     // Parses listen options such as ssl, http2, and backlog.
-    func parse_listen_stmt(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+    func parse_listen_stmt(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
         if i + 1 < ts.len() {
             self.parse_listen_value(ts.get(i + 1), cfg);
         }
@@ -617,7 +618,7 @@ class ConfigDsl {
 
     // Applies the supported rewrite subset: anchored patterns with one (.*)
     // capture and a $1 replacement in the target.
-    func parse_rewrite_target(self: server.ConfigDsl, pattern: String, target: String, path: String) -> String {
+    func parse_rewrite_target(self: web_server.ConfigDsl, pattern: String, target: String, path: String) -> String {
         if !self.util.starts_with(pattern, "^") {
             return "";
         }
@@ -653,7 +654,7 @@ class ConfigDsl {
     }
 
     // Applies rewrites stored under a specific config base.
-    func apply_rewrites_at(self: server.ConfigDsl, cfg: collections.Map<String, String>, base: String, path: String) -> String {
+    func apply_rewrites_at(self: web_server.ConfigDsl, cfg: collections.Map<String, String>, base: String, path: String) -> String {
         let out = path;
         let n = self.util.cfg_int_at(cfg, base, "rewrite_count", 0);
         let i = 0;
@@ -667,13 +668,13 @@ class ConfigDsl {
         return out;
     }
 
-    func apply_rewrites(self: server.ConfigDsl, cfg: collections.Map<String, String>, path: String) -> String {
+    func apply_rewrites(self: web_server.ConfigDsl, cfg: collections.Map<String, String>, path: String) -> String {
         return self.apply_rewrites_at(cfg, "", path);
     }
 
     // Parses a location block, including exact/regex/prefix mode and the
     // supported static, proxy, FastCGI, gzip, and try_files directives.
-    func parse_location(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>, loc_idx: Int) -> Int {
+    func parse_location(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>, loc_idx: Int) -> Int {
         let prefix = self.cursor.val(ts, i, "/");
         let mode = "prefix";
         let block_i = i + 2;
@@ -793,7 +794,7 @@ class ConfigDsl {
     }
 
     // Parses a full server block into the current workspace and snapshots it.
-    func parse_server(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+    func parse_server(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
         if i >= ts.len() {
             return self.cursor.skip_stmt(ts, i);
         }
@@ -881,7 +882,7 @@ class ConfigDsl {
     }
 
     // Parses the events block into worker connection settings.
-    func parse_events(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+    func parse_events(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
         if i >= ts.len() {
             return self.cursor.skip_stmt(ts, i);
         }
@@ -908,7 +909,7 @@ class ConfigDsl {
     }
 
     // Parses the http block and stores each server as a separate snapshot.
-    func parse_http(self: server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+    func parse_http(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
         if i >= ts.len() {
             return self.cursor.skip_stmt(ts, i);
         }
@@ -964,7 +965,7 @@ class ConfigDsl {
     }
 
     // Fills config defaults before user directives override them.
-    func config_set_defaults(self: server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
+    func config_set_defaults(self: web_server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
         _ = cfg.set("worker_processes", DEFAULT_WORKER_PROCESSES_TEXT);
         _ = cfg.set("worker_connections", DEFAULT_WORKER_CONNECTIONS_TEXT);
         _ = cfg.set("listen_host", DEFAULT_LISTEN_HOST);
@@ -999,17 +1000,17 @@ class ConfigBuilder {
     // Default-populated config map under construction.
     var cfg: collections.Map<String, String>;
     // DSL parser that mutates cfg.
-    var dsl: server.ConfigDsl;
+    var dsl: web_server.ConfigDsl;
 
-    func init(self: server.ConfigBuilder) -> Void {
+    func init(self: web_server.ConfigBuilder) -> Void {
         self.cfg = new collections.Map<String, String>();
-        self.dsl = new server.ConfigDsl();
+        self.dsl = new web_server.ConfigDsl();
         self.dsl.config_set_defaults(self.cfg);
     }
 
     // Normalizes "fastcgi_pass unix:/path.sock" before tokenization so the
     // socket path can pass through the generic tokenizer safely.
-    func normalize_unix_fastcgi_pass(self: server.ConfigBuilder, conf: String) -> String {
+    func normalize_unix_fastcgi_pass(self: web_server.ConfigBuilder, conf: String) -> String {
         let out = "";
         let needle = "fastcgi_pass unix:";
         let i = 0;
@@ -1031,10 +1032,10 @@ class ConfigBuilder {
     }
 
     // Tokenizes, parses, and returns a normalized config map.
-    func parse(self: server.ConfigBuilder, conf: String) -> collections.Map<String, String> {
+    func parse(self: web_server.ConfigBuilder, conf: String) -> collections.Map<String, String> {
         let normalized_conf = self.normalize_unix_fastcgi_pass(conf);
-        let ts = (new server.ConfigTokenizer()).tokenize(normalized_conf);
-        let out = (new server.ConfigParser(self.cfg, ts)).parse();
+        let ts = (new web_server.ConfigTokenizer()).tokenize(normalized_conf);
+        let out = (new web_server.ConfigParser(self.cfg, ts)).parse();
         _ = ts.free();
         return out;
     }
@@ -1047,16 +1048,16 @@ class ConfigParser {
     // Token stream produced by ConfigTokenizer.
     var ts: collections.Vector<String>;
     // Directive parser shared with ConfigBuilder.
-    var dsl: server.ConfigDsl;
+    var dsl: web_server.ConfigDsl;
 
-    func init(self: server.ConfigParser, cfg: collections.Map<String, String>, ts: collections.Vector<String>) -> Void {
+    func init(self: web_server.ConfigParser, cfg: collections.Map<String, String>, ts: collections.Vector<String>) -> Void {
         self.cfg = cfg;
         self.ts = ts;
-        self.dsl = new server.ConfigDsl();
+        self.dsl = new web_server.ConfigDsl();
     }
 
     // Parses one server block at top level.
-    func parse_server_block(self: server.ConfigParser, i: Int) -> Int {
+    func parse_server_block(self: web_server.ConfigParser, i: Int) -> Int {
         _ = self.cfg.set("server_total", strconv.itoa(self.dsl.util.cfg_int(self.cfg, "server_total", 0) + 1));
         let is_tls = self.dsl.server_block_has_tls(self.ts, i + 1);
         if is_tls {
@@ -1072,7 +1073,7 @@ class ConfigParser {
 
     // Creates an implicit default server when the config contains no server
     // block, preserving simple single-server usage.
-    func ensure_server(self: server.ConfigParser) -> Void {
+    func ensure_server(self: web_server.ConfigParser) -> Void {
         if self.dsl.util.cfg_int(self.cfg, "server_count", 0) == 0 {
             self.dsl.reset_server_workspace(self.cfg);
             self.dsl.ensure_default_location(self.cfg);
@@ -1082,7 +1083,7 @@ class ConfigParser {
     }
 
     // Dispatches top-level directives and skips unsupported statements.
-    func parse(self: server.ConfigParser) -> collections.Map<String, String> {
+    func parse(self: web_server.ConfigParser) -> collections.Map<String, String> {
         let i = 0;
         loop i < self.ts.len() {
             let t = self.ts.get(i);
@@ -1121,23 +1122,23 @@ class ServerConfig {
     // Flat parsed configuration.
     var cfg: collections.Map<String, String>;
 
-    func init(self: server.ServerConfig, cfg: collections.Map<String, String>) -> Void {
+    func init(self: web_server.ServerConfig, cfg: collections.Map<String, String>) -> Void {
         self.cfg = cfg;
     }
 
     // String lookup with default.
-    func get(self: server.ServerConfig, key: String, def: String = "") -> String {
-        return (new server.ServerUtil()).cfg_get(self.cfg, key, def);
+    func get(self: web_server.ServerConfig, key: String, def: String = "") -> String {
+        return (new web_server.ServerUtil()).cfg_get(self.cfg, key, def);
     }
 
     // Integer lookup with default.
-    func int(self: server.ServerConfig, key: String, def: Int = 0) -> Int {
-        return (new server.ServerUtil()).cfg_int(self.cfg, key, def);
+    func int(self: web_server.ServerConfig, key: String, def: Int = 0) -> Int {
+        return (new web_server.ServerUtil()).cfg_int(self.cfg, key, def);
     }
 
     // Human-readable summary for config checks and startup logs.
-    func summary(self: server.ServerConfig) -> String {
-        return (new server.ConfigSummary()).render(self.cfg);
+    func summary(self: web_server.ServerConfig) -> String {
+        return (new web_server.ConfigSummary()).render(self.cfg);
     }
 }
 
@@ -1152,14 +1153,14 @@ class TextConfigSource {
     // Raw config text.
     var text: String;
 
-    func init(self: server.TextConfigSource, text: String) -> Void {
+    func init(self: web_server.TextConfigSource, text: String) -> Void {
         self.text = text;
     }
 }
 
-norm impl ConfigSource<server.TextConfigSource> {
-    func config_source_load(self: server.TextConfigSource) -> collections.Map<String, String>, ErrCode {
-        let builder = new server.ConfigBuilder();
+norm impl ConfigSource<web_server.TextConfigSource> {
+    func config_source_load(self: web_server.TextConfigSource) -> collections.Map<String, String>, ErrCode {
+        let builder = new web_server.ConfigBuilder();
         return builder.parse(self.text), OK;
     }
 }
@@ -1169,31 +1170,31 @@ class FileConfigSource {
     // Path to the config file.
     var path: String;
 
-    func init(self: server.FileConfigSource, path: String) -> Void {
+    func init(self: web_server.FileConfigSource, path: String) -> Void {
         self.path = path;
     }
 }
 
-norm impl ConfigSource<server.FileConfigSource> {
-    func config_source_load(self: server.FileConfigSource) -> collections.Map<String, String>, ErrCode {
+norm impl ConfigSource<web_server.FileConfigSource> {
+    func config_source_load(self: web_server.FileConfigSource) -> collections.Map<String, String>, ErrCode {
         let text = fs.read_text(self.path)?;
-        return server.ConfigSource<server.TextConfigSource>.config_source_load(new server.TextConfigSource(text));
+        return web_server.ConfigSource<web_server.TextConfigSource>.config_source_load(new web_server.TextConfigSource(text));
     }
 }
 
 // Public loader API used by the CLI.
 class ConfigLoader {
-    func init(self: server.ConfigLoader) -> Void {
+    func init(self: web_server.ConfigLoader) -> Void {
     }
 
     // Parses an existing token stream.
-    func parse_tokens(self: server.ConfigLoader, cfg: collections.Map<String, String>, ts: collections.Vector<String>) -> collections.Map<String, String> {
-        return (new server.ConfigParser(cfg, ts)).parse();
+    func parse_tokens(self: web_server.ConfigLoader, cfg: collections.Map<String, String>, ts: collections.Vector<String>) -> collections.Map<String, String> {
+        return (new web_server.ConfigParser(cfg, ts)).parse();
     }
 
     // Parses raw config text.
-    func parse_text(self: server.ConfigLoader, conf: String) -> collections.Map<String, String> {
-        let cfg, err = server.ConfigSource<server.TextConfigSource>.config_source_load(new server.TextConfigSource(conf));
+    func parse_text(self: web_server.ConfigLoader, conf: String) -> collections.Map<String, String> {
+        let cfg, err = web_server.ConfigSource<web_server.TextConfigSource>.config_source_load(new web_server.TextConfigSource(conf));
         if err != OK {
             return new collections.Map<String, String>();
         }
@@ -1201,19 +1202,19 @@ class ConfigLoader {
     }
 
     // Reads and parses a config file.
-    func load(self: server.ConfigLoader, path: String) -> collections.Map<String, String>, ErrCode {
-        return server.ConfigSource<server.FileConfigSource>.config_source_load(new server.FileConfigSource(path));
+    func load(self: web_server.ConfigLoader, path: String) -> collections.Map<String, String>, ErrCode {
+        return web_server.ConfigSource<web_server.FileConfigSource>.config_source_load(new web_server.FileConfigSource(path));
     }
 }
 
 // Renders the listener and TLS summary shown by config checks and startup.
 class ConfigSummary {
-    func init(self: server.ConfigSummary) -> Void {
+    func init(self: web_server.ConfigSummary) -> Void {
     }
 
-    func render(self: server.ConfigSummary, cfg: collections.Map<String, String>) -> String {
-        let util = new server.ServerUtil();
-        let keys = new server.ConfigKeys();
+    func render(self: web_server.ConfigSummary, cfg: collections.Map<String, String>) -> String {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
         let listeners = "";
         let http_listeners = 0;
         let https_listeners = 0;

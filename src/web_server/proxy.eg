@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Egret-lang.org
 // SPDX-License-Identifier: MIT
 
-module server;
+module web_server;
 
+use web_server;
 use aio.tcp;
 use aio.tls;
 use collections;
@@ -14,12 +15,12 @@ use std;
 // TCP or TLS upstream connection, rewrites the request target, and streams the
 // raw upstream HTTP response back to the client.
 class ReverseProxy {
-    func init(self: server.ReverseProxy) -> Void {
+    func init(self: web_server.ReverseProxy) -> Void {
     }
 
     // Combines proxy_pass and the already-rewritten request path while avoiding
     // a double slash when both sides contain a boundary slash.
-    func target_url(self: server.ReverseProxy, base: String, path: String) -> String {
+    func target_url(self: web_server.ReverseProxy, base: String, path: String) -> String {
         if len(base) == 0 {
             return "";
         }
@@ -31,7 +32,7 @@ class ReverseProxy {
 
     // Replaces only the request-line target. Headers and body are preserved so
     // caller-provided proxy headers and payloads pass through unchanged.
-    func rewrite_request(self: server.ReverseProxy, req: server.HttpRequest, upstream_path: String) -> String {
+    func rewrite_request(self: web_server.ReverseProxy, req: web_server.HttpRequest, upstream_path: String) -> String {
         let out_req = req.raw;
         let first_end = strings.find_substr(req.raw, "\r\n");
         let method_end = strings.find_substr(req.raw, " ");
@@ -45,9 +46,9 @@ class ReverseProxy {
 
     // Sends one request to the upstream and returns either the upstream raw
     // response or a generated 502 response when DNS/connection/response fails.
-    async func request(self: server.ReverseProxy, cfg: collections.Map<String, String>, req: server.HttpRequest, proxy_pass: String, path: String, keep_alive: Bool) -> String {
-        let util = new server.ServerUtil();
-        let factory = new server.HttpResponseFactory();
+    async func request(self: web_server.ReverseProxy, cfg: collections.Map<String, String>, req: web_server.HttpRequest, proxy_pass: String, path: String, keep_alive: Bool) -> String {
+        let util = new web_server.ServerUtil();
+        let factory = new web_server.HttpResponseFactory();
         let u, u_err = net.url.parse(self.target_url(proxy_pass, path));
         if u_err != OK {
             return factory.response_conn(502, "text/plain", "Bad proxy_pass", keep_alive);
@@ -73,7 +74,7 @@ class ReverseProxy {
         if fd <= 0 {
             return factory.response_conn(502, "text/plain", "Bad Gateway", keep_alive);
         }
-        let transport = new server.HttpTransport(fd, is_tls, timeout_ms);
+        let transport = new web_server.HttpTransport(fd, is_tls, timeout_ms);
         _ = await transport.send_all(out_req);
         let resp = await transport.recv_all(max_bytes);
         _ = transport.close();

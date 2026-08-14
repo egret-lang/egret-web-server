@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Egret-lang.org
 // SPDX-License-Identifier: MIT
 
-module server;
+module web_server;
 
+use web_server;
 use aio.fastcgi;
 use aio.tcp;
 use aio.tls;
@@ -15,27 +16,27 @@ use std;
 // incoming HTTP request, sends them to either TCP or Unix-socket PHP-FPM, and
 // converts FastCGI stdout back into a normal HTTP response.
 class FastcgiGateway {
-    func init(self: server.FastcgiGateway) -> Void {
+    func init(self: web_server.FastcgiGateway) -> Void {
     }
 
     // Reads the remote peer address from the correct transport API.
-    func remote_addr(self: server.FastcgiGateway, client_fd: Int, is_tls: Bool) -> String {
-        return (new server.FastcgiClientPeer(client_fd, is_tls)).remote_addr();
+    func remote_addr(self: web_server.FastcgiGateway, client_fd: Int, is_tls: Bool) -> String {
+        return (new web_server.FastcgiClientPeer(client_fd, is_tls)).remote_addr();
     }
 
     // Reads the remote peer port from the correct transport API.
-    func remote_port(self: server.FastcgiGateway, client_fd: Int, is_tls: Bool) -> Int {
-        return (new server.FastcgiClientPeer(client_fd, is_tls)).remote_port();
+    func remote_port(self: web_server.FastcgiGateway, client_fd: Int, is_tls: Bool) -> Int {
+        return (new web_server.FastcgiClientPeer(client_fd, is_tls)).remote_port();
     }
 
     // Builds the complete FastCGI parameter map for this request.
-    func params(self: server.FastcgiGateway, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: server.HttpRequest, path: String, client_fd: Int, is_tls: Bool) -> collections.Map<String, String> {
-        return (new server.FastcgiParamsBuilder()).params(cfg, cfg_base, loc, req, path, req.body(), self.remote_addr(client_fd, is_tls), self.remote_port(client_fd, is_tls));
+    func params(self: web_server.FastcgiGateway, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: web_server.HttpRequest, path: String, client_fd: Int, is_tls: Bool) -> collections.Map<String, String> {
+        return (new web_server.FastcgiParamsBuilder()).params(cfg, cfg_base, loc, req, path, req.body(), self.remote_addr(client_fd, is_tls), self.remote_port(client_fd, is_tls));
     }
 
     // Reverses the config-time escaping used to store Unix socket paths in the
     // flat config map without confusing key separators.
-    func decode_socket_path(self: server.FastcgiGateway, encoded: String) -> String {
+    func decode_socket_path(self: web_server.FastcgiGateway, encoded: String) -> String {
         let out = "";
         let i = 0;
         loop (; i < len(encoded); ) {
@@ -71,13 +72,13 @@ class FastcgiGateway {
 
     // Executes one FastCGI request and returns a generated 502/500 on upstream
     // or protocol failure.
-    async func request(self: server.FastcgiGateway, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: server.HttpRequest, path: String, keep_alive: Bool, client_fd: Int, is_tls: Bool, pass: String) -> String {
-        let endpoint = new server.FastcgiEndpoint(pass);
+    async func request(self: web_server.FastcgiGateway, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: web_server.HttpRequest, path: String, keep_alive: Bool, client_fd: Int, is_tls: Bool, pass: String) -> String {
+        let endpoint = new web_server.FastcgiEndpoint(pass);
         let body = req.body();
         let params = self.params(cfg, cfg_base, loc, req, path, client_fd, is_tls);
-        let util = new server.ServerUtil();
-        let keys = new server.ConfigKeys();
-        let factory = new server.HttpResponseFactory();
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
+        let factory = new web_server.HttpResponseFactory();
         let timeout_ms = util.cfg_int(cfg, "proxy_timeout_ms", DEFAULT_PROXY_TIMEOUT_MS);
         if endpoint.is_unix() {
             let socket_path = endpoint.unix_path();
@@ -102,7 +103,7 @@ class FastcgiGateway {
             if len(unix_resp.err) > 0 && len(unix_resp.out) == 0 {
                 return factory.response_conn(502, "text/plain", unix_resp.err, keep_alive);
             }
-            return (new server.FastcgiResponseBuilder()).stdout_response(unix_resp.out, keep_alive);
+            return (new web_server.FastcgiResponseBuilder()).stdout_response(unix_resp.out, keep_alive);
         }
         let host = endpoint.host();
         let port = endpoint.port();
@@ -121,7 +122,7 @@ class FastcgiGateway {
         if len(resp.err) > 0 && len(resp.out) == 0 {
             return factory.response_conn(502, "text/plain", resp.err, keep_alive);
         }
-        return (new server.FastcgiResponseBuilder()).stdout_response(resp.out, keep_alive);
+        return (new web_server.FastcgiResponseBuilder()).stdout_response(resp.out, keep_alive);
     }
 }
 
@@ -131,14 +132,14 @@ class FastcgiEndpoint {
     // Raw fastcgi_pass directive value.
     var pass: String;
 
-    func init(self: server.FastcgiEndpoint, pass: String) -> Void {
+    func init(self: web_server.FastcgiEndpoint, pass: String) -> Void {
         self.pass = strings.trim_space(pass);
     }
 
     // Removes the optional fastcgi:// scheme.
-    func normalized(self: server.FastcgiEndpoint) -> String {
+    func normalized(self: web_server.FastcgiEndpoint) -> String {
         let p = self.pass;
-        let util = new server.ServerUtil();
+        let util = new web_server.ServerUtil();
         if util.starts_with(p, "fastcgi://") {
             p = substr(p, 10, len(p) - 10);
         }
@@ -146,16 +147,16 @@ class FastcgiEndpoint {
     }
 
     // True when the endpoint points to a Unix domain socket.
-    func is_unix(self: server.FastcgiEndpoint) -> Bool {
+    func is_unix(self: web_server.FastcgiEndpoint) -> Bool {
         let p = self.normalized();
-        let util = new server.ServerUtil();
+        let util = new web_server.ServerUtil();
         return util.starts_with(p, "uds") || util.starts_with(p, "unix:") || util.starts_with(p, "unix_socket|");
     }
 
     // Returns the Unix socket path without the unix: or unix:// prefix.
-    func unix_path(self: server.FastcgiEndpoint) -> String {
+    func unix_path(self: web_server.FastcgiEndpoint) -> String {
         let p = self.normalized();
-        let util = new server.ServerUtil();
+        let util = new web_server.ServerUtil();
         if util.starts_with(p, "uds") {
             return substr(p, 3, len(p) - 3);
         }
@@ -172,7 +173,7 @@ class FastcgiEndpoint {
     }
 
     // Returns TCP host, defaulting to 127.0.0.1 for shorthand values.
-    func host(self: server.FastcgiEndpoint) -> String {
+    func host(self: web_server.FastcgiEndpoint) -> String {
         let p = self.normalized();
         if self.is_unix() {
             return "";
@@ -185,23 +186,23 @@ class FastcgiEndpoint {
     }
 
     // Returns TCP port, defaulting to PHP-FPM port 9000.
-    func port(self: server.FastcgiEndpoint) -> Int {
+    func port(self: web_server.FastcgiEndpoint) -> Int {
         let p = self.normalized();
         let colon = strings.last_index(p, ":");
         if colon <= 0 {
             return DEFAULT_FASTCGI_PORT;
         }
-        return (new server.ServerUtil()).atoi_or(substr(p, colon + 1, len(p) - (colon + 1)), DEFAULT_FASTCGI_PORT);
+        return (new web_server.ServerUtil()).atoi_or(substr(p, colon + 1, len(p) - (colon + 1)), DEFAULT_FASTCGI_PORT);
     }
 }
 
 // Small string replacement helper used for FastCGI variable expansion.
 class TextRewriter {
-    func init(self: server.TextRewriter) -> Void {
+    func init(self: web_server.TextRewriter) -> Void {
     }
 
     // Replaces all occurrences of pat with repl without using regex semantics.
-    func replace_all(self: server.TextRewriter, s: String, pat: String, repl: String) -> String {
+    func replace_all(self: web_server.TextRewriter, s: String, pat: String, repl: String) -> String {
         if len(pat) == 0 {
             return s;
         }
@@ -234,17 +235,17 @@ class TcpClientPeer {
     // Accepted TCP socket fd.
     var fd: Int;
 
-    func init(self: server.TcpClientPeer, fd: Int) -> Void {
+    func init(self: web_server.TcpClientPeer, fd: Int) -> Void {
         self.fd = fd;
     }
 }
 
-norm impl ClientPeer<server.TcpClientPeer> {
-    func client_peer_host(self: server.TcpClientPeer) -> String {
+norm impl ClientPeer<web_server.TcpClientPeer> {
+    func client_peer_host(self: web_server.TcpClientPeer) -> String {
         return aio.tcp.peer_host(self.fd);
     }
 
-    func client_peer_port(self: server.TcpClientPeer) -> Int, ErrCode {
+    func client_peer_port(self: web_server.TcpClientPeer) -> Int, ErrCode {
         let port, err = aio.tcp.peer_port(self.fd);
         return port, err;
     }
@@ -255,17 +256,17 @@ class TlsClientPeer {
     // Accepted TLS socket fd.
     var fd: Int;
 
-    func init(self: server.TlsClientPeer, fd: Int) -> Void {
+    func init(self: web_server.TlsClientPeer, fd: Int) -> Void {
         self.fd = fd;
     }
 }
 
-norm impl ClientPeer<server.TlsClientPeer> {
-    func client_peer_host(self: server.TlsClientPeer) -> String {
+norm impl ClientPeer<web_server.TlsClientPeer> {
+    func client_peer_host(self: web_server.TlsClientPeer) -> String {
         return aio.tls.peer_host(self.fd);
     }
 
-    func client_peer_port(self: server.TlsClientPeer) -> Int, ErrCode {
+    func client_peer_port(self: web_server.TlsClientPeer) -> Int, ErrCode {
         let port, err = aio.tls.peer_port(self.fd);
         return port, err;
     }
@@ -278,18 +279,18 @@ class FastcgiClientPeer {
     // Whether fd is a TLS connection.
     var is_tls: Bool;
 
-    func init(self: server.FastcgiClientPeer, fd: Int, is_tls: Bool) -> Void {
+    func init(self: web_server.FastcgiClientPeer, fd: Int, is_tls: Bool) -> Void {
         self.fd = fd;
         self.is_tls = is_tls;
     }
 
     // Returns an empty string if peer lookup fails.
-    func remote_addr(self: server.FastcgiClientPeer) -> String {
+    func remote_addr(self: web_server.FastcgiClientPeer) -> String {
         let addr = "";
         if self.is_tls {
-            addr = server.ClientPeer<server.TlsClientPeer>.client_peer_host(new server.TlsClientPeer(self.fd));
+            addr = web_server.ClientPeer<web_server.TlsClientPeer>.client_peer_host(new web_server.TlsClientPeer(self.fd));
         } else {
-            addr = server.ClientPeer<server.TcpClientPeer>.client_peer_host(new server.TcpClientPeer(self.fd));
+            addr = web_server.ClientPeer<web_server.TcpClientPeer>.client_peer_host(new web_server.TcpClientPeer(self.fd));
         }
         if len(addr) == 0 {
             return "127.0.0.1";
@@ -298,15 +299,15 @@ class FastcgiClientPeer {
     }
 
     // Returns zero if peer port lookup fails.
-    func remote_port(self: server.FastcgiClientPeer) -> Int {
+    func remote_port(self: web_server.FastcgiClientPeer) -> Int {
         let port = 0;
         if self.is_tls {
-            let tls_port, tls_port_err = server.ClientPeer<server.TlsClientPeer>.client_peer_port(new server.TlsClientPeer(self.fd));
+            let tls_port, tls_port_err = web_server.ClientPeer<web_server.TlsClientPeer>.client_peer_port(new web_server.TlsClientPeer(self.fd));
             if tls_port_err == OK {
                 port = tls_port;
             }
         } else {
-            let tcp_port, tcp_port_err = server.ClientPeer<server.TcpClientPeer>.client_peer_port(new server.TcpClientPeer(self.fd));
+            let tcp_port, tcp_port_err = web_server.ClientPeer<web_server.TcpClientPeer>.client_peer_port(new web_server.TcpClientPeer(self.fd));
             if tcp_port_err == OK {
                 port = tcp_port;
             }
@@ -321,29 +322,29 @@ class FastcgiClientPeer {
 // Creates default CGI variables and applies user configured fastcgi_param
 // overrides from the matched location.
 class FastcgiParamsBuilder {
-    func init(self: server.FastcgiParamsBuilder) -> Void {
+    func init(self: web_server.FastcgiParamsBuilder) -> Void {
     }
 
     // Chooses the script name. A matching location path falls back to
     // fastcgi_index for directory-like requests.
-    func script_name(self: server.FastcgiParamsBuilder, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String) -> String {
+    func script_name(self: web_server.FastcgiParamsBuilder, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String) -> String {
         let script = path;
         if len(script) == 0 {
             script = "/";
         }
         if strings.ends_with(script, "/") {
-            let util = new server.ServerUtil();
-            let keys = new server.ConfigKeys();
+            let util = new web_server.ServerUtil();
+            let keys = new web_server.ConfigKeys();
             script += util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".fastcgi_index"), DEFAULT_FASTCGI_INDEX);
         }
         return script;
     }
 
     // Expands supported nginx-style variables in fastcgi_param values.
-    func expand_value(self: server.FastcgiParamsBuilder, template: String, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: server.HttpRequest, path: String, body: String, remote_addr: String, remote_port: Int) -> String {
-        let util = new server.ServerUtil();
-        let keys = new server.ConfigKeys();
-        let replace = new server.TextRewriter();
+    func expand_value(self: web_server.FastcgiParamsBuilder, template: String, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: web_server.HttpRequest, path: String, body: String, remote_addr: String, remote_port: Int) -> String {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
+        let replace = new web_server.TextRewriter();
         let root = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".root"), util.cfg_get_at(cfg, cfg_base, "root", "."));
         let script = self.script_name(cfg, cfg_base, loc, path);
         let out = template;
@@ -367,9 +368,9 @@ class FastcgiParamsBuilder {
     }
 
     // Builds the baseline CGI/1.1 environment expected by PHP-FPM.
-    func default_params(self: server.FastcgiParamsBuilder, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: server.HttpRequest, path: String, body: String, remote_addr: String, remote_port: Int) -> collections.Map<String, String> {
-        let util = new server.ServerUtil();
-        let keys = new server.ConfigKeys();
+    func default_params(self: web_server.FastcgiParamsBuilder, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: web_server.HttpRequest, path: String, body: String, remote_addr: String, remote_port: Int) -> collections.Map<String, String> {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
         let params = new collections.Map<String, String>();
         let root = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".root"), util.cfg_get_at(cfg, cfg_base, "root", "."));
         let script = self.script_name(cfg, cfg_base, loc, path);
@@ -395,9 +396,9 @@ class FastcgiParamsBuilder {
     }
 
     // Merges configured fastcgi_param directives over the defaults.
-    func params(self: server.FastcgiParamsBuilder, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: server.HttpRequest, path: String, body: String, remote_addr: String, remote_port: Int) -> collections.Map<String, String> {
-        let util = new server.ServerUtil();
-        let keys = new server.ConfigKeys();
+    func params(self: web_server.FastcgiParamsBuilder, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: web_server.HttpRequest, path: String, body: String, remote_addr: String, remote_port: Int) -> collections.Map<String, String> {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
         let params = self.default_params(cfg, cfg_base, loc, req, path, body, remote_addr, remote_port);
         let count = util.cfg_int_at(cfg, cfg_base, keys.loc_key(loc, ".fastcgi_param_count"), 0);
         loop (let i = 0; i < count; i += 1) {
@@ -413,23 +414,23 @@ class FastcgiParamsBuilder {
 
 // Converts FastCGI stdout headers/body into an HTTP response object.
 class FastcgiResponseBuilder {
-    func init(self: server.FastcgiResponseBuilder) -> Void {
+    func init(self: web_server.FastcgiResponseBuilder) -> Void {
     }
 
     // Reads an optional "Status:" header and falls back to 200.
-    func status_code(self: server.FastcgiResponseBuilder, headers: String) -> Int {
+    func status_code(self: web_server.FastcgiResponseBuilder, headers: String) -> Int {
         let lc = strings.to_lower_ascii(headers);
         let p = strings.find_substr(lc, "status:");
         if p < 0 {
             return 200;
         }
         let rest = substr(headers, p + 7, len(headers) - (p + 7));
-        let util = new server.ServerUtil();
+        let util = new web_server.ServerUtil();
         return util.atoi_or(strings.trim_space(rest), 200);
     }
 
     // Reads Content-Type from FastCGI headers and defaults to text/html.
-    func content_type(self: server.FastcgiResponseBuilder, headers: String) -> String {
+    func content_type(self: web_server.FastcgiResponseBuilder, headers: String) -> String {
         let lc = strings.to_lower_ascii(headers);
         let p = strings.find_substr(lc, "content-type:");
         if p < 0 {
@@ -444,10 +445,10 @@ class FastcgiResponseBuilder {
     }
 
     // Preserves FastCGI headers other than Status and Content-Type.
-    func extra_headers(self: server.FastcgiResponseBuilder, headers: String) -> String {
+    func extra_headers(self: web_server.FastcgiResponseBuilder, headers: String) -> String {
         let out = "";
         let pos = 0;
-        let util = new server.ServerUtil();
+        let util = new web_server.ServerUtil();
         loop pos < len(headers) {
             let nl = strings.find_substr_from(headers, "\r\n", pos);
             let line = "";
@@ -467,8 +468,8 @@ class FastcgiResponseBuilder {
     }
 
     // Splits FastCGI stdout at CRLFCRLF and renders the final HTTP response.
-    func stdout_response(self: server.FastcgiResponseBuilder, stdout_data: String, keep_alive: Bool) -> String {
-        let factory = new server.HttpResponseFactory();
+    func stdout_response(self: web_server.FastcgiResponseBuilder, stdout_data: String, keep_alive: Bool) -> String {
+        let factory = new web_server.HttpResponseFactory();
         let sep = strings.find_substr(stdout_data, "\r\n\r\n");
         if sep < 0 {
             return factory.response_conn(200, "text/html; charset=utf-8", stdout_data, keep_alive);

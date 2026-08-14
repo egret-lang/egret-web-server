@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Egret-lang.org
 // SPDX-License-Identifier: MIT
 
-module server;
+module web_server;
 
+use web_server;
 use aio.tcp;
 use aio.tls;
 use strconv;
@@ -23,7 +24,7 @@ class HttpResponse {
     // Optional raw headers appended before Content-Length.
     var extra_headers: String;
 
-    func init(self: server.HttpResponse, code: Int, content_type: String, body: String, keep_alive: Bool = false, extra_headers: String = "") -> Void {
+    func init(self: web_server.HttpResponse, code: Int, content_type: String, body: String, keep_alive: Bool = false, extra_headers: String = "") -> Void {
         self.code = code;
         self.content_type = content_type;
         self.body = body;
@@ -32,7 +33,7 @@ class HttpResponse {
     }
 
     // Maps supported status codes to reason phrases.
-    func reason(self: server.HttpResponse) -> String {
+    func reason(self: web_server.HttpResponse) -> String {
         return match self.code {
             301 => "Moved Permanently",
             400 => "Bad Request",
@@ -45,7 +46,7 @@ class HttpResponse {
     }
 
     // Serializes the keep-alive decision into the Connection header.
-    func connection_header(self: server.HttpResponse) -> String {
+    func connection_header(self: web_server.HttpResponse) -> String {
         return match self.keep_alive {
             true => "\r\nConnection: keep-alive\r\n\r\n",
             _ => "\r\nConnection: close\r\n\r\n",
@@ -53,7 +54,7 @@ class HttpResponse {
     }
 
     // Renders the full HTTP/1.1 response message.
-    func render(self: server.HttpResponse) -> String {
+    func render(self: web_server.HttpResponse) -> String {
         return "HTTP/1.1 " + strconv.itoa(self.code) + " " + self.reason()
         + "\r\nServer: egret-web-server\r\nContent-Type: " + self.content_type
         + "\r\nContent-Length: " + strconv.itoa(len(self.body))
@@ -72,58 +73,58 @@ class HttpRequest {
     // Full request bytes as received from the client.
     var raw: String;
     // Stateless parser shared by all accessors.
-    var parser: server.HttpRequestParser;
+    var parser: web_server.HttpRequestParser;
 
-    func init(self: server.HttpRequest, raw: String) -> Void {
+    func init(self: web_server.HttpRequest, raw: String) -> Void {
         self.raw = raw;
-        self.parser = new server.HttpRequestParser();
+        self.parser = new web_server.HttpRequestParser();
     }
 
     // Path without query string.
-    func path(self: server.HttpRequest) -> String {
+    func path(self: web_server.HttpRequest) -> String {
         return self.parser.path(self.raw);
     }
 
     // Original request target from the request line.
-    func target(self: server.HttpRequest) -> String {
+    func target(self: web_server.HttpRequest) -> String {
         return self.parser.target(self.raw);
     }
 
-    func method(self: server.HttpRequest) -> String {
+    func method(self: web_server.HttpRequest) -> String {
         return self.parser.method(self.raw);
     }
 
-    func protocol(self: server.HttpRequest) -> String {
+    func protocol(self: web_server.HttpRequest) -> String {
         return self.parser.protocol(self.raw);
     }
 
-    func query(self: server.HttpRequest) -> String {
+    func query(self: web_server.HttpRequest) -> String {
         return self.parser.query(self.raw);
     }
 
-    func query_string(self: server.HttpRequest) -> String {
+    func query_string(self: web_server.HttpRequest) -> String {
         return self.parser.query_string(self.raw);
     }
 
-    func header(self: server.HttpRequest, key_lc: String) -> String {
+    func header(self: web_server.HttpRequest, key_lc: String) -> String {
         return self.parser.header(self.raw, key_lc);
     }
 
-    func body(self: server.HttpRequest) -> String {
+    func body(self: web_server.HttpRequest) -> String {
         return self.parser.body(self.raw);
     }
 
-    func keep_alive(self: server.HttpRequest) -> Bool {
+    func keep_alive(self: web_server.HttpRequest) -> Bool {
         return self.parser.keep_alive(self.raw);
     }
 
-    func host(self: server.HttpRequest) -> String {
+    func host(self: web_server.HttpRequest) -> String {
         return self.parser.host(self.raw);
     }
 
     // Convenience wrapper for gzip negotiation.
-    func accepts_gzip(self: server.HttpRequest) -> Bool {
-        return (new server.GzipRequestCapabilities()).accepts_gzip(self.raw);
+    func accepts_gzip(self: web_server.HttpRequest) -> Bool {
+        return (new web_server.GzipRequestCapabilities()).accepts_gzip(self.raw);
     }
 }
 
@@ -139,23 +140,23 @@ class TcpHttpConn {
     // Socket file descriptor owned by the connection wrapper.
     var fd: Int;
 
-    func init(self: server.TcpHttpConn, fd: Int) -> Void {
+    func init(self: web_server.TcpHttpConn, fd: Int) -> Void {
         self.fd = fd;
     }
 }
 
-norm impl HttpConn<server.TcpHttpConn> {
-    async func http_conn_recv(self: server.TcpHttpConn, max_bytes: Int, timeout_ms: Int) -> String, ErrCode {
+norm impl HttpConn<web_server.TcpHttpConn> {
+    async func http_conn_recv(self: web_server.TcpHttpConn, max_bytes: Int, timeout_ms: Int) -> String, ErrCode {
         let chunk, err = await aio.tcp.recv(self.fd, max_bytes, timeout_ms);
         return chunk, err;
     }
 
-    async func http_conn_send(self: server.TcpHttpConn, data: String, timeout_ms: Int) -> Int, ErrCode {
+    async func http_conn_send(self: web_server.TcpHttpConn, data: String, timeout_ms: Int) -> Int, ErrCode {
         let n, err = await aio.tcp.send(self.fd, data, timeout_ms);
         return n, err;
     }
 
-    func http_conn_close(self: server.TcpHttpConn) -> Void {
+    func http_conn_close(self: web_server.TcpHttpConn) -> Void {
         _ = aio.tcp.close(self.fd);
     }
 }
@@ -165,23 +166,23 @@ class TlsHttpConn {
     // TLS socket file descriptor owned by the connection wrapper.
     var fd: Int;
 
-    func init(self: server.TlsHttpConn, fd: Int) -> Void {
+    func init(self: web_server.TlsHttpConn, fd: Int) -> Void {
         self.fd = fd;
     }
 }
 
-norm impl HttpConn<server.TlsHttpConn> {
-    async func http_conn_recv(self: server.TlsHttpConn, max_bytes: Int, timeout_ms: Int) -> String, ErrCode {
+norm impl HttpConn<web_server.TlsHttpConn> {
+    async func http_conn_recv(self: web_server.TlsHttpConn, max_bytes: Int, timeout_ms: Int) -> String, ErrCode {
         let chunk, err = await aio.tls.recv(self.fd, max_bytes, timeout_ms);
         return chunk, err;
     }
 
-    async func http_conn_send(self: server.TlsHttpConn, data: String, timeout_ms: Int) -> Int, ErrCode {
+    async func http_conn_send(self: web_server.TlsHttpConn, data: String, timeout_ms: Int) -> Int, ErrCode {
         let n, err = await aio.tls.send(self.fd, data, timeout_ms);
         return n, err;
     }
 
-    func http_conn_close(self: server.TlsHttpConn) -> Void {
+    func http_conn_close(self: web_server.TlsHttpConn) -> Void {
         _ = aio.tls.close(self.fd);
     }
 }
@@ -196,49 +197,49 @@ class HttpTransport {
     // Per-operation timeout in milliseconds.
     var timeout_ms: Int;
 
-    func init(self: server.HttpTransport, fd: Int, is_tls: Bool = false, timeout_ms: Int = DEFAULT_KEEPALIVE_TIMEOUT_MS) -> Void {
+    func init(self: web_server.HttpTransport, fd: Int, is_tls: Bool = false, timeout_ms: Int = DEFAULT_KEEPALIVE_TIMEOUT_MS) -> Void {
         self.fd = fd;
         self.is_tls = is_tls;
         self.timeout_ms = timeout_ms;
     }
 
     // Receives a complete HTTP request, including fixed-length or chunked body.
-    async func recv_request(self: server.HttpTransport, max_total: Int) -> String {
+    async func recv_request(self: web_server.HttpTransport, max_total: Int) -> String {
         if self.is_tls {
-            let tls_stream = new server.HttpConnStream<server.TlsHttpConn>(new server.TlsHttpConn(self.fd));
+            let tls_stream = new web_server.HttpConnStream<web_server.TlsHttpConn>(new web_server.TlsHttpConn(self.fd));
             return await tls_stream.recv_request(max_total, self.timeout_ms);
         }
-        let tcp_stream = new server.HttpConnStream<server.TcpHttpConn>(new server.TcpHttpConn(self.fd));
+        let tcp_stream = new web_server.HttpConnStream<web_server.TcpHttpConn>(new web_server.TcpHttpConn(self.fd));
         return await tcp_stream.recv_request(max_total, self.timeout_ms);
     }
 
     // Sends the complete response or proxied request.
-    async func send_all(self: server.HttpTransport, data: String) -> Int {
+    async func send_all(self: web_server.HttpTransport, data: String) -> Int {
         if self.is_tls {
-            let tls_stream = new server.HttpConnStream<server.TlsHttpConn>(new server.TlsHttpConn(self.fd));
+            let tls_stream = new web_server.HttpConnStream<web_server.TlsHttpConn>(new web_server.TlsHttpConn(self.fd));
             return await tls_stream.send_all(data, self.timeout_ms);
         }
-        let tcp_stream = new server.HttpConnStream<server.TcpHttpConn>(new server.TcpHttpConn(self.fd));
+        let tcp_stream = new web_server.HttpConnStream<web_server.TcpHttpConn>(new web_server.TcpHttpConn(self.fd));
         return await tcp_stream.send_all(data, self.timeout_ms);
     }
 
     // Reads until EOF or max_total, used for upstream proxy responses.
-    async func recv_all(self: server.HttpTransport, max_total: Int) -> String {
+    async func recv_all(self: web_server.HttpTransport, max_total: Int) -> String {
         if self.is_tls {
-            let tls_stream = new server.HttpConnStream<server.TlsHttpConn>(new server.TlsHttpConn(self.fd));
+            let tls_stream = new web_server.HttpConnStream<web_server.TlsHttpConn>(new web_server.TlsHttpConn(self.fd));
             return await tls_stream.recv_all(max_total, self.timeout_ms);
         }
-        let tcp_stream = new server.HttpConnStream<server.TcpHttpConn>(new server.TcpHttpConn(self.fd));
+        let tcp_stream = new web_server.HttpConnStream<web_server.TcpHttpConn>(new web_server.TcpHttpConn(self.fd));
         return await tcp_stream.recv_all(max_total, self.timeout_ms);
     }
 
     // Closes the selected transport.
-    func close(self: server.HttpTransport) -> Void {
+    func close(self: web_server.HttpTransport) -> Void {
         if self.is_tls {
-            let tls_stream = new server.HttpConnStream<server.TlsHttpConn>(new server.TlsHttpConn(self.fd));
+            let tls_stream = new web_server.HttpConnStream<web_server.TlsHttpConn>(new web_server.TlsHttpConn(self.fd));
             _ = tls_stream.close();
         } else {
-            let tcp_stream = new server.HttpConnStream<server.TcpHttpConn>(new server.TcpHttpConn(self.fd));
+            let tcp_stream = new web_server.HttpConnStream<web_server.TcpHttpConn>(new web_server.TcpHttpConn(self.fd));
             _ = tcp_stream.close();
         }
     }
@@ -247,34 +248,34 @@ class HttpTransport {
 // Factory for common response shapes used across static, proxy, FastCGI, and
 // error paths.
 class HttpResponseFactory {
-    func init(self: server.HttpResponseFactory) -> Void {
+    func init(self: web_server.HttpResponseFactory) -> Void {
     }
 
-    func response_conn(self: server.HttpResponseFactory, code: Int, content_type: String, body: String, keep_alive: Bool) -> String {
+    func response_conn(self: web_server.HttpResponseFactory, code: Int, content_type: String, body: String, keep_alive: Bool) -> String {
         return self.response_extra(code, content_type, body, keep_alive, "");
     }
 
-    func response_extra(self: server.HttpResponseFactory, code: Int, content_type: String, body: String, keep_alive: Bool, extra_headers: String) -> String {
-        let resp = new server.HttpResponse(code, content_type, body, keep_alive, extra_headers);
+    func response_extra(self: web_server.HttpResponseFactory, code: Int, content_type: String, body: String, keep_alive: Bool, extra_headers: String) -> String {
+        let resp = new web_server.HttpResponse(code, content_type, body, keep_alive, extra_headers);
         return resp.render();
     }
 
-    func redirect_response(self: server.HttpResponseFactory, location: String, keep_alive: Bool) -> String {
+    func redirect_response(self: web_server.HttpResponseFactory, location: String, keep_alive: Bool) -> String {
         return self.response_extra(301, "text/plain; charset=utf-8", "Moved Permanently", keep_alive, "\r\nLocation: " + location);
     }
 
-    func response(self: server.HttpResponseFactory, code: Int, content_type: String, body: String) -> String {
+    func response(self: web_server.HttpResponseFactory, code: Int, content_type: String, body: String) -> String {
         return self.response_conn(code, content_type, body, false);
     }
 }
 
 // Hand-written HTTP/1.1 parser for request lines, headers, and bodies.
 class HttpRequestParser {
-    func init(self: server.HttpRequestParser) -> Void {
+    func init(self: web_server.HttpRequestParser) -> Void {
     }
 
     // Extracts the path component and strips any query string.
-    func path(self: server.HttpRequestParser, req: String) -> String {
+    func path(self: web_server.HttpRequestParser, req: String) -> String {
         let method_end = strings.find_substr(req, " ");
         if method_end < 0 {
             return "/";
@@ -284,11 +285,11 @@ class HttpRequestParser {
         if target_end < 0 {
             return "/";
         }
-        return (new server.ServerUtil()).clean_path(substr(rest, 0, target_end));
+        return (new web_server.ServerUtil()).clean_path(substr(rest, 0, target_end));
     }
 
     // Extracts the raw request target.
-    func target(self: server.HttpRequestParser, req: String) -> String {
+    func target(self: web_server.HttpRequestParser, req: String) -> String {
         let method_end = strings.find_substr(req, " ");
         if method_end < 0 {
             return "/";
@@ -302,7 +303,7 @@ class HttpRequestParser {
     }
 
     // Extracts the request method.
-    func method(self: server.HttpRequestParser, req: String) -> String {
+    func method(self: web_server.HttpRequestParser, req: String) -> String {
         let method_end = strings.find_substr(req, " ");
         if method_end < 0 {
             return "GET";
@@ -311,7 +312,7 @@ class HttpRequestParser {
     }
 
     // Extracts the protocol token from the request line.
-    func protocol(self: server.HttpRequestParser, req: String) -> String {
+    func protocol(self: web_server.HttpRequestParser, req: String) -> String {
         let first_end = strings.find_substr(req, "\r\n");
         let first = req;
         if first_end >= 0 {
@@ -325,7 +326,7 @@ class HttpRequestParser {
     }
 
     // Extracts the query including the leading question mark.
-    func query(self: server.HttpRequestParser, req: String) -> String {
+    func query(self: web_server.HttpRequestParser, req: String) -> String {
         let method_end = strings.find_substr(req, " ");
         if method_end < 0 {
             return "";
@@ -344,7 +345,7 @@ class HttpRequestParser {
     }
 
     // Extracts the query without the leading question mark.
-    func query_string(self: server.HttpRequestParser, req: String) -> String {
+    func query_string(self: web_server.HttpRequestParser, req: String) -> String {
         let q = self.query(req);
         if len(q) == 0 {
             return "";
@@ -353,7 +354,7 @@ class HttpRequestParser {
     }
 
     // Case-insensitive header lookup. key_lc must be lowercase.
-    func header(self: server.HttpRequestParser, req: String, key_lc: String) -> String {
+    func header(self: web_server.HttpRequestParser, req: String, key_lc: String) -> String {
         let marker = "\r\n" + key_lc + ":";
         let p = strings.find_substr_ascii_case(req, marker);
         if p < 0 {
@@ -369,18 +370,18 @@ class HttpRequestParser {
     }
 
     // Parses Content-Length and returns zero when absent or invalid.
-    func content_length(self: server.HttpRequestParser, req: String) -> Int {
-        return (new server.ServerUtil()).atoi_or(self.header(req, "content-length"), 0);
+    func content_length(self: web_server.HttpRequestParser, req: String) -> Int {
+        return (new web_server.ServerUtil()).atoi_or(self.header(req, "content-length"), 0);
     }
 
     // Detects Transfer-Encoding: chunked.
-    func is_chunked(self: server.HttpRequestParser, req: String) -> Bool {
+    func is_chunked(self: web_server.HttpRequestParser, req: String) -> Bool {
         let te = strings.to_lower_ascii(self.header(req, "transfer-encoding"));
         return strings.contains(te, "chunked");
     }
 
     // Returns bytes after the CRLFCRLF header separator.
-    func raw_body(self: server.HttpRequestParser, req: String) -> String {
+    func raw_body(self: web_server.HttpRequestParser, req: String) -> String {
         let sep = strings.find_substr(req, "\r\n\r\n");
         if sep < 0 {
             return "";
@@ -390,7 +391,7 @@ class HttpRequestParser {
 
     // Checks whether the buffered chunked body contains the terminating
     // zero-size chunk and its trailing CRLF.
-    func chunked_body_complete(self: server.HttpRequestParser, body: String) -> Bool {
+    func chunked_body_complete(self: web_server.HttpRequestParser, body: String) -> Bool {
         let pos = 0;
         loop pos < len(body) {
             let nl = strings.find_substr_from(body, "\r\n", pos);
@@ -418,7 +419,7 @@ class HttpRequestParser {
     }
 
     // Decodes a chunked request body into contiguous payload bytes.
-    func decode_chunked_body(self: server.HttpRequestParser, body: String) -> String {
+    func decode_chunked_body(self: web_server.HttpRequestParser, body: String) -> String {
         let out = "";
         let pos = 0;
         loop pos < len(body) {
@@ -444,7 +445,7 @@ class HttpRequestParser {
     }
 
     // Returns the decoded body for chunked requests, otherwise the raw body.
-    func body(self: server.HttpRequestParser, req: String) -> String {
+    func body(self: web_server.HttpRequestParser, req: String) -> String {
         let body = self.raw_body(req);
         if self.is_chunked(req) {
             return self.decode_chunked_body(body);
@@ -453,7 +454,7 @@ class HttpRequestParser {
     }
 
     // Implements HTTP/1.1 keep-alive rules plus explicit Connection headers.
-    func keep_alive(self: server.HttpRequestParser, req: String) -> Bool {
+    func keep_alive(self: web_server.HttpRequestParser, req: String) -> Bool {
         if strings.find_substr_ascii_case(req, "\r\nconnection: close") >= 0 {
             return false;
         }
@@ -465,12 +466,12 @@ class HttpRequestParser {
 
     // Normalizes Host for virtual-host matching by trimming, lowercasing, and
     // removing a non-IPv6 port suffix.
-    func normalize_host_name(self: server.HttpRequestParser, host: String) -> String {
+    func normalize_host_name(self: web_server.HttpRequestParser, host: String) -> String {
         let h = strings.to_lower_ascii(strings.trim_space(host));
         if len(h) == 0 {
             return "";
         }
-        if (new server.ServerUtil()).starts_with(h, "[") {
+        if (new web_server.ServerUtil()).starts_with(h, "[") {
             return h;
         }
         let p = strings.last_index(h, ":");
@@ -481,7 +482,7 @@ class HttpRequestParser {
     }
 
     // Extracts and normalizes the Host header.
-    func host(self: server.HttpRequestParser, req: String) -> String {
+    func host(self: web_server.HttpRequestParser, req: String) -> String {
         let marker = "\r\nhost:";
         let p = strings.find_substr_ascii_case(req, marker);
         if p < 0 {
@@ -499,18 +500,18 @@ class HttpRequestParser {
 
 // Generic stream helper over HttpConn. It owns no socket itself; it only loops
 // reads/writes until a full request or response has been transferred.
-class HttpConnStream<T: server.HttpConn> {
+class HttpConnStream<T: web_server.HttpConn> {
     // Underlying TCP or TLS adapter.
     var conn: T;
 
-    func init(self: server.HttpConnStream<T>, conn: T) -> Void {
+    func init(self: web_server.HttpConnStream<T>, conn: T) -> Void {
         self.conn = conn;
     }
 
     // Receives headers first, then reads either chunked body or Content-Length
     // bytes without exceeding max_total.
-    async func recv_request(self: server.HttpConnStream<T>, max_total: Int, timeout_ms: Int) -> String {
-        let parser = new server.HttpRequestParser();
+    async func recv_request(self: web_server.HttpConnStream<T>, max_total: Int, timeout_ms: Int) -> String {
+        let parser = new web_server.HttpRequestParser();
         let req = await self.recv_until("\r\n\r\n", max_total, timeout_ms);
         let sep = strings.find_substr(req, "\r\n\r\n");
         if sep < 0 {
@@ -521,7 +522,7 @@ class HttpConnStream<T: server.HttpConn> {
                 if len(req) >= max_total {
                     return req;
                 }
-                let chunk, err = await server.HttpConn<T>.http_conn_recv(self.conn, 4096, timeout_ms);
+                let chunk, err = await web_server.HttpConn<T>.http_conn_recv(self.conn, 4096, timeout_ms);
                 if err != OK && err != ERR_EOF {
                     return req;
                 }
@@ -546,7 +547,7 @@ class HttpConnStream<T: server.HttpConn> {
             if want > 4096 {
                 want = 4096;
             }
-            let chunk, err = await server.HttpConn<T>.http_conn_recv(self.conn, want, timeout_ms);
+            let chunk, err = await web_server.HttpConn<T>.http_conn_recv(self.conn, want, timeout_ms);
             if err != OK && err != ERR_EOF {
                 return req;
             }
@@ -559,7 +560,7 @@ class HttpConnStream<T: server.HttpConn> {
     }
 
     // Reads until a marker is present, EOF happens, or the maximum size is hit.
-    async func recv_until(self: server.HttpConnStream<T>, pat: String, max_total: Int, timeout_ms: Int) -> String {
+    async func recv_until(self: web_server.HttpConnStream<T>, pat: String, max_total: Int, timeout_ms: Int) -> String {
         let buf = "";
         let done = false;
         loop !done {
@@ -571,7 +572,7 @@ class HttpConnStream<T: server.HttpConn> {
             if done {
                 break;
             }
-            let chunk, err = await server.HttpConn<T>.http_conn_recv(self.conn, 4096, timeout_ms);
+            let chunk, err = await web_server.HttpConn<T>.http_conn_recv(self.conn, 4096, timeout_ms);
             if err != OK && err != ERR_EOF {
                 break;
             }
@@ -584,10 +585,10 @@ class HttpConnStream<T: server.HttpConn> {
     }
 
     // Writes until all bytes have been accepted by the underlying transport.
-    async func send_all(self: server.HttpConnStream<T>, data: String, timeout_ms: Int) -> Int {
+    async func send_all(self: web_server.HttpConnStream<T>, data: String, timeout_ms: Int) -> Int {
         let off = 0;
         loop off < len(data) {
-            let n, err = await server.HttpConn<T>.http_conn_send(self.conn, substr(data, off, len(data) - off), timeout_ms);
+            let n, err = await web_server.HttpConn<T>.http_conn_send(self.conn, substr(data, off, len(data) - off), timeout_ms);
             if err != OK {
                 return 1;
             }
@@ -600,10 +601,10 @@ class HttpConnStream<T: server.HttpConn> {
     }
 
     // Reads a raw stream until EOF or size limit. Used by reverse proxying.
-    async func recv_all(self: server.HttpConnStream<T>, max_total: Int, timeout_ms: Int) -> String {
+    async func recv_all(self: web_server.HttpConnStream<T>, max_total: Int, timeout_ms: Int) -> String {
         let out = "";
         loop len(out) < max_total {
-            let chunk, err = await server.HttpConn<T>.http_conn_recv(self.conn, 8192, timeout_ms);
+            let chunk, err = await web_server.HttpConn<T>.http_conn_recv(self.conn, 8192, timeout_ms);
             if err != OK && err != ERR_EOF {
                 break;
             }
@@ -616,7 +617,7 @@ class HttpConnStream<T: server.HttpConn> {
     }
 
     // Closes the underlying transport adapter.
-    func close(self: server.HttpConnStream<T>) -> Void {
-        _ = server.HttpConn<T>.http_conn_close(self.conn);
+    func close(self: web_server.HttpConnStream<T>) -> Void {
+        _ = web_server.HttpConn<T>.http_conn_close(self.conn);
     }
 }

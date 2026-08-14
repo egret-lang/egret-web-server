@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Egret-lang.org
 // SPDX-License-Identifier: MIT
 
-module server;
+module web_server;
 
+use web_server;
 use aio.fs;
 use collections;
 use fs;
@@ -14,14 +15,14 @@ use std;
 // request path through root/alias/try_files rules, reads the file from disk, and
 // optionally gzip-encodes compressible responses.
 class StaticFileServer {
-    func init(self: server.StaticFileServer) -> Void {
+    func init(self: web_server.StaticFileServer) -> Void {
     }
 
     // Expands a try_files candidate such as "$uri" or "$uri/" into a concrete
     // disk path. Alias locations strip the matched prefix before joining.
-    func try_path(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String, candidate: String) -> String {
-        let util = new server.ServerUtil();
-        let keys = new server.ConfigKeys();
+    func try_path(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String, candidate: String) -> String {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
         let p = candidate;
         if p == "$uri" {
             p = path;
@@ -43,47 +44,47 @@ class StaticFileServer {
     }
 
     // Reads and serves a known disk file using the gzip policy from config.
-    async func serve_disk_file(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: server.HttpRequest, disk: String, keep_alive: Bool) -> String {
-        let util = new server.ServerUtil();
-        let factory = new server.HttpResponseFactory();
+    async func serve_disk_file(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: web_server.HttpRequest, disk: String, keep_alive: Bool) -> String {
+        let util = new web_server.ServerUtil();
+        let factory = new web_server.HttpResponseFactory();
         let content_type = util.mime(disk);
         let body, body_err = await aio.fs.read_text(disk);
         if body_err != OK {
             return factory.response_conn(500, "text/plain", "read error", keep_alive);
         }
-        let policy = new server.GzipPolicy();
+        let policy = new web_server.GzipPolicy();
         if policy.should_compress(cfg, cfg_base, req, content_type, body) {
-            let encoded = server.ResponseEncoder<server.GzipResponseEncoder>.encode_response_body(new server.GzipResponseEncoder(), req, content_type, body);
+            let encoded = web_server.ResponseEncoder<web_server.GzipResponseEncoder>.encode_response_body(new web_server.GzipResponseEncoder(), req, content_type, body);
             return factory.response_extra(200, content_type, encoded.body, keep_alive, encoded.extra_headers);
         }
-        let identity_encoded = server.ResponseEncoder<server.IdentityResponseEncoder>.encode_response_body(new server.IdentityResponseEncoder(), req, content_type, body);
+        let identity_encoded = web_server.ResponseEncoder<web_server.IdentityResponseEncoder>.encode_response_body(new web_server.IdentityResponseEncoder(), req, content_type, body);
         return factory.response_extra(200, content_type, identity_encoded.body, keep_alive, identity_encoded.extra_headers);
     }
 
     // Serves a known disk file using explicit gzip inputs. This is used by the
     // hot path after dispatch has already computed compression settings.
-    async func serve_disk_file_with_policy(self: server.StaticFileServer, req: server.HttpRequest, disk: String, keep_alive: Bool, gzip_enabled: Bool, gzip_min_length: Int) -> String {
-        let util = new server.ServerUtil();
-        let factory = new server.HttpResponseFactory();
+    async func serve_disk_file_with_policy(self: web_server.StaticFileServer, req: web_server.HttpRequest, disk: String, keep_alive: Bool, gzip_enabled: Bool, gzip_min_length: Int) -> String {
+        let util = new web_server.ServerUtil();
+        let factory = new web_server.HttpResponseFactory();
         let content_type = util.mime(disk);
         let body, body_err = await aio.fs.read_text(disk);
         if body_err != OK {
             return factory.response_conn(500, "text/plain", "read error", keep_alive);
         }
-        let policy = new server.GzipPolicy();
+        let policy = new web_server.GzipPolicy();
         if gzip_enabled && len(body) >= gzip_min_length && req.accepts_gzip() && policy.compressible_type(content_type) {
-            let encoded = server.ResponseEncoder<server.GzipResponseEncoder>.encode_response_body(new server.GzipResponseEncoder(), req, content_type, body);
+            let encoded = web_server.ResponseEncoder<web_server.GzipResponseEncoder>.encode_response_body(new web_server.GzipResponseEncoder(), req, content_type, body);
             return factory.response_extra(200, content_type, encoded.body, keep_alive, encoded.extra_headers);
         }
-        let identity_encoded = server.ResponseEncoder<server.IdentityResponseEncoder>.encode_response_body(new server.IdentityResponseEncoder(), req, content_type, body);
+        let identity_encoded = web_server.ResponseEncoder<web_server.IdentityResponseEncoder>.encode_response_body(new web_server.IdentityResponseEncoder(), req, content_type, body);
         return factory.response_extra(200, content_type, identity_encoded.body, keep_alive, identity_encoded.extra_headers);
     }
 
     // Resolves the disk path without reading it. Request dispatch uses this to
     // preflight static compression and choose the fastest response path.
-    func resolve_disk(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String) -> String {
-        let util = new server.ServerUtil();
-        let keys = new server.ConfigKeys();
+    func resolve_disk(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String) -> String {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
         let try_count = util.cfg_int_at(cfg, cfg_base, keys.loc_key(loc, ".try_count"), 0);
         loop (let i = 0; i < try_count; i += 1) {
             let cand = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".try.") + strconv.itoa(i), "$uri");
@@ -114,10 +115,10 @@ class StaticFileServer {
 
     // Full static serving path: try configured candidates first, fall back to
     // index.html for "/", and return a 404 when no file exists.
-    async func serve(self: server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: server.HttpRequest, loc: Int, path: String, keep_alive: Bool) -> String {
-        let util = new server.ServerUtil();
-        let keys = new server.ConfigKeys();
-        let factory = new server.HttpResponseFactory();
+    async func serve(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: web_server.HttpRequest, loc: Int, path: String, keep_alive: Bool) -> String {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
+        let factory = new web_server.HttpResponseFactory();
         let try_count = util.cfg_int_at(cfg, cfg_base, keys.loc_key(loc, ".try_count"), 0);
         loop (let i = 0; i < try_count; i += 1) {
             let cand = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".try.") + strconv.itoa(i), "$uri");

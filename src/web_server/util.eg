@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Egret-lang.org
 // SPDX-License-Identifier: MIT
 
-module server;
+module web_server;
 
+use web_server;
 use collections;
 use strconv;
 use strings;
@@ -47,11 +48,11 @@ internal const DEFAULT_GC_MAX_ADAPTIVE_THRESHOLD_BYTES: Int = 67108864;
 // normalization, and MIME detection. Keeping this logic centralized prevents
 // subtle differences between static files, proxying, FastCGI, and vhost code.
 class ServerUtil {
-    func init(self: server.ServerUtil) -> Void {
+    func init(self: web_server.ServerUtil) -> Void {
     }
 
     // Parses an integer and falls back when the value is empty or invalid.
-    func atoi_or(self: server.ServerUtil, s: String, def: Int) -> Int {
+    func atoi_or(self: web_server.ServerUtil, s: String, def: Int) -> Int {
         if len(s) == 0 {
             return def;
         }
@@ -62,42 +63,42 @@ class ServerUtil {
         return n;
     }
 
-    func itoa(self: server.ServerUtil, n: Int) -> String {
+    func itoa(self: web_server.ServerUtil, n: Int) -> String {
         return strconv.itoa(n);
     }
 
     // Reads a string from the flat config map. The map stores every directive
     // as a key/value pair, so callers must always provide a default.
-    func cfg_get(self: server.ServerUtil, cfg: collections.Map<String, String>, key: String, def: String) -> String {
+    func cfg_get(self: web_server.ServerUtil, cfg: collections.Map<String, String>, key: String, def: String) -> String {
         if cfg.has(key) {
             return cfg.get(key);
         }
         return def;
     }
 
-    func cfg_int(self: server.ServerUtil, cfg: collections.Map<String, String>, key: String, def: Int) -> Int {
+    func cfg_int(self: web_server.ServerUtil, cfg: collections.Map<String, String>, key: String, def: Int) -> Int {
         return self.atoi_or(self.cfg_get(cfg, key, ""), def);
     }
 
     // Builds a namespaced config key. Virtual hosts use bases such as
     // "vhost.0", while the default server uses an empty base.
-    func cfg_key_at(self: server.ServerUtil, base: String, key: String) -> String {
+    func cfg_key_at(self: web_server.ServerUtil, base: String, key: String) -> String {
         if len(base) == 0 {
             return key;
         }
         return base + "." + key;
     }
 
-    func cfg_get_at(self: server.ServerUtil, cfg: collections.Map<String, String>, base: String, key: String, def: String) -> String {
+    func cfg_get_at(self: web_server.ServerUtil, cfg: collections.Map<String, String>, base: String, key: String, def: String) -> String {
         return self.cfg_get(cfg, self.cfg_key_at(base, key), def);
     }
 
-    func cfg_int_at(self: server.ServerUtil, cfg: collections.Map<String, String>, base: String, key: String, def: Int) -> Int {
+    func cfg_int_at(self: web_server.ServerUtil, cfg: collections.Map<String, String>, base: String, key: String, def: Int) -> Int {
         return self.atoi_or(self.cfg_get_at(cfg, base, key, ""), def);
     }
 
     // Parses nginx-style size literals like "16k", "1m", or "2g".
-    func parse_size(self: server.ServerUtil, s: String, def: Int) -> Int {
+    func parse_size(self: web_server.ServerUtil, s: String, def: Int) -> Int {
         let raw = strings.trim(s);
         let n = len(raw);
         if n == 0 {
@@ -127,7 +128,7 @@ class ServerUtil {
 
     // Parses durations into milliseconds. Bare numbers are treated as seconds
     // to match common web-server configuration syntax.
-    func parse_time_ms(self: server.ServerUtil, s: String, def: Int) -> Int {
+    func parse_time_ms(self: web_server.ServerUtil, s: String, def: Int) -> Int {
         let raw = strings.trim(s);
         let n = len(raw);
         if n == 0 {
@@ -143,7 +144,7 @@ class ServerUtil {
         return self.atoi_or(raw, def / 1000) * 1000;
     }
 
-    func starts_with(self: server.ServerUtil, s: String, prefix: String) -> Bool {
+    func starts_with(self: web_server.ServerUtil, s: String, prefix: String) -> Bool {
         if len(prefix) > len(s) {
             return false;
         }
@@ -152,7 +153,7 @@ class ServerUtil {
 
     // Extracts a suffix from simple regex locations such as "\.php$". The
     // server intentionally supports only the subset it can match cheaply.
-    func simple_regex_suffix(self: server.ServerUtil, pattern: String) -> String {
+    func simple_regex_suffix(self: web_server.ServerUtil, pattern: String) -> String {
         if len(pattern) <= 1 {
             return "";
         }
@@ -184,7 +185,7 @@ class ServerUtil {
         return out;
     }
 
-    func match_regex_loc(self: server.ServerUtil, pattern: String, path: String) -> Bool {
+    func match_regex_loc(self: web_server.ServerUtil, pattern: String, path: String) -> Bool {
         let suffix = self.simple_regex_suffix(pattern);
         if len(suffix) > 0 {
             return strings.ends_with(path, suffix);
@@ -195,8 +196,8 @@ class ServerUtil {
     // Implements location selection for a server or virtual-host config base:
     // exact matches win immediately, regex suffix matches are accepted, and
     // prefix locations use longest-prefix semantics.
-    func match_loc_at(self: server.ServerUtil, cfg: collections.Map<String, String>, base: String, path: String) -> Int {
-        let keys = new server.ConfigKeys();
+    func match_loc_at(self: web_server.ServerUtil, cfg: collections.Map<String, String>, base: String, path: String) -> Int {
+        let keys = new web_server.ConfigKeys();
         let n = self.cfg_int_at(cfg, base, "loc_count", 1);
         let best = 0;
         let best_len = -1;
@@ -217,13 +218,13 @@ class ServerUtil {
         return best;
     }
 
-    func match_loc(self: server.ServerUtil, cfg: collections.Map<String, String>, path: String) -> Int {
+    func match_loc(self: web_server.ServerUtil, cfg: collections.Map<String, String>, path: String) -> Int {
         return self.match_loc_at(cfg, "", path);
     }
 
     // Removes query text, normalizes empty paths, and blocks parent traversal
     // before any path is mapped to disk.
-    func clean_path(self: server.ServerUtil, path: String) -> String {
+    func clean_path(self: web_server.ServerUtil, path: String) -> String {
         let p = path;
         let q = strings.find_substr(p, "?");
         if q >= 0 {
@@ -239,7 +240,7 @@ class ServerUtil {
     }
 
     // Joins a configured document root or alias with a request path.
-    func join_path(self: server.ServerUtil, root: String, path: String) -> String {
+    func join_path(self: web_server.ServerUtil, root: String, path: String) -> String {
         if len(path) > 0 && substr(path, 0, 1) == "/" {
             path = substr(path, 1, len(path) - 1);
         }
@@ -254,7 +255,7 @@ class ServerUtil {
 
     // Minimal MIME table used by static responses. Unknown file extensions are
     // served as binary data.
-    func mime(self: server.ServerUtil, path: String) -> String {
+    func mime(self: web_server.ServerUtil, path: String) -> String {
         let lc = strings.to_lower_ascii(path);
         if strings.contains(lc, ".html") {
             return "text/html; charset=utf-8";
