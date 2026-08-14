@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Egret-lang.org
+// SPDX-License-Identifier: MIT
+
 use server;
 
 async func main(argc: Int, argv: Int) -> Int {
