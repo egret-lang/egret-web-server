@@ -1,2 +1,3 @@
+# Egret‑Lang: GitHub does not yet support syntax highlighting, temporarily use Rust
 *.eg linguist-language=Rust
 *.conf linguist-language=Nginx
