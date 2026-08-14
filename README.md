@@ -4,12 +4,12 @@
 
 ## Build & Run:
 
-If you haven't installed egret-lang yet, please install it first.
+If you haven't installed egret-lang yet, please install it first:
 ```sh
 curl -fsSL https://egret-lang.org/install.sh | sh
 ```
 
-Then build the server.
+Then build the server:
 ```sh
 cd egret-web-server_source_directory
 egret build
