@@ -1,1 +1,2 @@
 *.eg linguist-language=Rust
+*.conf linguist-language=Nginx
