@@ -358,13 +358,113 @@ class MapCloner {
     func init(self: web_server.MapCloner) -> Void {
     }
 
+    func copy_if_present(self: web_server.MapCloner, src: collections.Map<String, String>, out: collections.Map<String, String>, key: String) -> Void {
+        if src.has(key) {
+            _ = out.set(key, src.get(key));
+        }
+    }
+
+    func copy_server_names(self: web_server.MapCloner, src: collections.Map<String, String>, out: collections.Map<String, String>, base: String) -> Void {
+        let util = new web_server.ServerUtil();
+        let count_key = util.cfg_key_at(base, "server_name_count");
+        let count = util.cfg_int(src, count_key, 0);
+        _ = out.set(count_key, util.itoa(count));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "server_name"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "server_names"));
+        loop (let i = 0; i < count; i += 1) {
+            self.copy_if_present(src, out, util.cfg_key_at(base, "server_name." + util.itoa(i)));
+        }
+    }
+
+    func copy_locations(self: web_server.MapCloner, src: collections.Map<String, String>, out: collections.Map<String, String>, base: String) -> Void {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
+        let loc_count_key = util.cfg_key_at(base, "loc_count");
+        let loc_count = util.cfg_int(src, loc_count_key, 0);
+        _ = out.set(loc_count_key, util.itoa(loc_count));
+        loop (let loc = 0; loc < loc_count; loc += 1) {
+            let loc_base = keys.loc_key(loc, "");
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".prefix"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".mode"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".root"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".index"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".alias"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".proxy_pass"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".fastcgi_pass"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".backend_kind"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".fastcgi_backend"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".fastcgi_unix_path"));
+            self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".fastcgi_index"));
+            let fp_count_key = util.cfg_key_at(base, loc_base + ".fastcgi_param_count");
+            let fp_count = util.cfg_int(src, fp_count_key, 0);
+            _ = out.set(fp_count_key, util.itoa(fp_count));
+            loop (let fpi = 0; fpi < fp_count; fpi += 1) {
+                let fp_key = loc_base + ".fastcgi_param." + util.itoa(fpi);
+                self.copy_if_present(src, out, util.cfg_key_at(base, fp_key + ".name"));
+                self.copy_if_present(src, out, util.cfg_key_at(base, fp_key + ".value"));
+            }
+            let try_count_key = util.cfg_key_at(base, loc_base + ".try_count");
+            let try_count = util.cfg_int(src, try_count_key, 0);
+            _ = out.set(try_count_key, util.itoa(try_count));
+            loop (let ti = 0; ti < try_count; ti += 1) {
+                self.copy_if_present(src, out, util.cfg_key_at(base, loc_base + ".try." + util.itoa(ti)));
+            }
+        }
+    }
+
+    func copy_rewrites(self: web_server.MapCloner, src: collections.Map<String, String>, out: collections.Map<String, String>, base: String) -> Void {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
+        let rewrite_count_key = util.cfg_key_at(base, "rewrite_count");
+        let rewrite_count = util.cfg_int(src, rewrite_count_key, 0);
+        _ = out.set(rewrite_count_key, util.itoa(rewrite_count));
+        loop (let ri = 0; ri < rewrite_count; ri += 1) {
+            self.copy_if_present(src, out, util.cfg_key_at(base, keys.rewrite_key(ri, ".pattern")));
+            self.copy_if_present(src, out, util.cfg_key_at(base, keys.rewrite_key(ri, ".target")));
+        }
+    }
+
+    func copy_server_base(self: web_server.MapCloner, src: collections.Map<String, String>, out: collections.Map<String, String>, base: String) -> Void {
+        let util = new web_server.ServerUtil();
+        self.copy_server_names(src, out, base);
+        self.copy_if_present(src, out, util.cfg_key_at(base, "root"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "index"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "ssl_certificate"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "ssl_certificate_key"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "https_redirect"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "gzip"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "gzip_min_length"));
+        self.copy_locations(src, out, base);
+        self.copy_rewrites(src, out, base);
+    }
+
     func clone(self: web_server.MapCloner, src: collections.Map<String, String>) -> collections.Map<String, String> {
         let out = new collections.Map<String, String>();
-        let keys = src.keys();
-        loop (let i = 0; i < keys.len(); i += 1) {
-            let key = keys.get_unchecked(i);
-            let val = src.get(key);
-            _ = out.set(substr(key, 0, len(key)), substr(val, 0, len(val)));
+        let util = new web_server.ServerUtil();
+        self.copy_if_present(src, out, "bind_key");
+        self.copy_if_present(src, out, "worker_processes");
+        self.copy_if_present(src, out, "worker_connections");
+        self.copy_if_present(src, out, "client_max_body_size");
+        self.copy_if_present(src, out, "keepalive_timeout_ms");
+        self.copy_if_present(src, out, "proxy_timeout_ms");
+        self.copy_if_present(src, out, "max_response_bytes");
+        self.copy_if_present(src, out, "listen_host");
+        self.copy_if_present(src, out, "listen_port");
+        self.copy_if_present(src, out, "backlog");
+        self.copy_if_present(src, out, "https_enabled");
+        self.copy_if_present(src, out, "ssl_certificate");
+        self.copy_if_present(src, out, "ssl_certificate_key");
+        let redirect_count = util.cfg_int(src, "https_redirect_name_count", 0);
+        _ = out.set("https_redirect_name_count", util.itoa(redirect_count));
+        self.copy_if_present(src, out, "https_redirect_names");
+        loop (let i = 0; i < redirect_count; i += 1) {
+            self.copy_if_present(src, out, "https_redirect_name." + util.itoa(i));
+        }
+        self.copy_server_base(src, out, "");
+        let vhost_count = util.cfg_int(src, "vhost_count", 0);
+        _ = out.set("vhost_count", util.itoa(vhost_count));
+        loop (let vi = 0; vi < vhost_count; vi += 1) {
+            self.copy_server_base(src, out, "vhost." + util.itoa(vi));
         }
         return out;
     }
@@ -715,7 +815,9 @@ class RequestDispatcher {
         if len(proxy_pass) > 0 {
             self.keep_alive = false;
             ctx.keep_alive = false;
-            resp = await web_server.RequestHandler<web_server.ProxyRequestHandler>.handle_request(new web_server.ProxyRequestHandler(proxy_pass), listener, cfg_base, ctx);
+            let proxy_timeout_ms = util.cfg_int(listener, "proxy_timeout_ms", DEFAULT_PROXY_TIMEOUT_MS);
+            let max_response_bytes = util.cfg_int(listener, "max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES);
+            resp = await (new web_server.ReverseProxy()).request_with_limits(req, proxy_pass, path, false, proxy_timeout_ms, max_response_bytes);
         } else if backend_kind == "fastcgi" && len(fastcgi_pass) > 0 {
             self.keep_alive = false;
             ctx.keep_alive = false;
@@ -863,64 +965,8 @@ class ClientRequestTask {
     func init(self: web_server.ClientRequestTask) -> Void {
     }
 
-    // Duplicates redirect check for the older direct path.
-    func should_redirect_https(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, req: web_server.HttpRequest) -> Bool {
-        let host = req.host();
-        if len(host) == 0 {
-            return false;
-        }
-        let util = new web_server.ServerUtil();
-        return strings.contains(util.cfg_get(listener, "https_redirect_names", "|"), "|" + host + "|");
-    }
-
-    // Builds HTTPS redirect URL for the older direct path.
-    func redirect_url(self: web_server.ClientRequestTask, req: web_server.HttpRequest) -> String {
-        return "https://" + req.host() + req.path();
-    }
-
-    // Checks whether a vhost matches a host name.
-    func vhost_matches(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, idx: Int, name: String) -> Bool {
-        let host = (new web_server.HttpRequestParser()).normalize_host_name(name);
-        if len(host) == 0 || host == DEFAULT_SERVER_NAME {
-            return false;
-        }
-        let util = new web_server.ServerUtil();
-        let registry = new web_server.ListenerRegistry();
-        return strings.contains(util.cfg_get(listener, registry.vhost_key(idx, ".server_names"), DEFAULT_SERVER_NAMES), "|" + host + "|");
-    }
-
-    // Returns the vhost config-base prefix.
-    func vhost_base(self: web_server.ClientRequestTask, idx: Int) -> String {
-        return (new web_server.ListenerRegistry()).vhost_key(idx, "");
-    }
-
-    // Selects request config base by Host header or TLS SNI.
-    func select_base(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, req: web_server.HttpRequest, sni: String) -> String {
-        let util = new web_server.ServerUtil();
-        let host = req.host();
-        let count = util.cfg_int(listener, "vhost_count", 0);
-        if len(host) > 0 {
-            loop (let i = 0; i < count; i += 1) {
-                if self.vhost_matches(listener, i, host) {
-                    return self.vhost_base(i);
-                }
-            }
-        }
-        if len(sni) > 0 {
-            loop (let i = 0; i < count; i += 1) {
-                if self.vhost_matches(listener, i, sni) {
-                    return self.vhost_base(i);
-                }
-            }
-        }
-        if count > 0 {
-            return self.vhost_base(0);
-        }
-        return "";
-    }
-
-    // Handles a client connection, including repeated requests on keep-alive
-    // connections and static fast-path compression checks.
+    // Handles a client connection, including repeated requests on keep-alive.
+    // Every valid request goes through RequestDispatcher.
     async func handle(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, is_tls: Bool, cfd: Int) -> Int {
         let util = new web_server.ServerUtil();
         let max_body = util.cfg_int(listener, "client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE);
@@ -942,39 +988,11 @@ class ClientRequestTask {
                 open = false;
             } else {
                 let request = new web_server.HttpRequest(req);
-                let keys = new web_server.ConfigKeys();
-                let keep_alive = request.keep_alive() && handled + 1 < keepalive_limit && conn.timeout_ms > 0;
-                let response = "";
-                let can_keep_alive = keep_alive;
-                if !conn.is_tls && self.should_redirect_https(listener, request) {
-                    response = factory.redirect_response(self.redirect_url(request), false);
-                    can_keep_alive = false;
-                } else {
-                    let cfg_base = self.select_base(listener, request, conn.sni);
-                    let dsl = new web_server.ConfigDsl();
-                    let path = dsl.apply_rewrites_at(listener, cfg_base, request.path());
-                    let loc = util.match_loc_at(listener, cfg_base, path);
-                    let proxy_pass = util.cfg_get_at(listener, cfg_base, keys.loc_key(loc, ".proxy_pass"), "");
-                    let backend_kind = util.cfg_get_at(listener, cfg_base, keys.loc_key(loc, ".backend_kind"), "");
-                    let fastcgi_pass = util.cfg_get_at(listener, cfg_base, keys.loc_key(loc, ".fastcgi_backend"), "");
-                    if len(proxy_pass) > 0 || (backend_kind == "fastcgi" && len(fastcgi_pass) > 0) {
-                        let dispatcher = new web_server.RequestDispatcher();
-                        response = await dispatcher.dispatch((new web_server.MapCloner()).clone(listener), conn, request, false);
-                        can_keep_alive = false;
-                    } else {
-                        let gzip_enabled = util.cfg_get_at(listener, cfg_base, "gzip", "off") == "on";
-                        let gzip_min_length = util.cfg_int_at(listener, cfg_base, "gzip_min_length", DEFAULT_GZIP_MIN_LENGTH);
-                        let disk = (new web_server.StaticFileServer()).resolve_disk(listener, cfg_base, loc, path);
-                        if len(disk) == 0 {
-                            response = factory.response_conn(404, "text/plain; charset=utf-8", "Not Found", keep_alive);
-                        } else {
-                            response = await (new web_server.StaticFileServer()).serve_disk_file_with_policy(request, disk, keep_alive, gzip_enabled, gzip_min_length);
-                        }
-                    }
-                }
+                let dispatcher = new web_server.RequestDispatcher();
+                let response = await dispatcher.dispatch(listener, conn, request, handled + 1 < keepalive_limit);
                 _ = await conn.send(response);
                 handled += 1;
-                if !can_keep_alive {
+                if !dispatcher.keep_alive {
                     open = false;
                 }
             }
@@ -1230,23 +1248,62 @@ class WebServerApplication {
         }
     }
 
+    // Starts listener workers concurrently without storing Future objects in a
+    // generic container. Each Future stays in its own async frame, which avoids
+    // the GC-sensitive Vector<Future(Int)> path seen on multi-listener workers.
+    async func run_worker_listener_chain(self: web_server.WebServerApplication, li: Int) -> Int {
+        if li >= self.plan.listener_count {
+            return 0;
+        }
+        let worker_listener = self.plan.load_listener(li);
+        _ = worker_listener.pin();
+        let listener = new web_server.ServerListener(worker_listener);
+        let current = spawn listener.serve_open(self.max_requests);
+        let next_rc = await self.run_worker_listener_chain(li + 1);
+        let current_rc = join current;
+        if current_rc != 0 {
+            return current_rc;
+        }
+        return next_rc;
+    }
+
     // Runs one worker set in the current process.
     async func run_worker_set(self: web_server.WebServerApplication) -> Int {
-        let hs = new collections.Vector<Future(Int)>();
-        loop (let li = 0; li < self.plan.listener_count; li += 1) {
-            let worker_listener = self.plan.load_listener(li);
-            _ = worker_listener.pin();
-            let listener = new web_server.ServerListener(worker_listener);
-            _ = hs.push(spawn listener.serve_open(self.max_requests));
+        return await self.run_worker_listener_chain(0);
+    }
+
+    // Runs one child worker process and exits the child after cleanup.
+    async func run_child_worker(self: web_server.WebServerApplication) -> Int {
+        let child_rc = await self.run_worker_set();
+        _ = self.close_listeners();
+        _ = aio.fs.shutdown();
+        _ = os.exit(child_rc);
+        return child_rc;
+    }
+
+    // Forks one real worker for a configured slot. The master keeps listener
+    // descriptors open so later replacement workers can inherit them.
+    async func fork_worker_slot(self: web_server.WebServerApplication, slot: Int) -> Int, ErrCode {
+        let pid, fork_err = os.fork();
+        if fork_err != OK {
+            print("egret-web-server: failed to fork worker slot " + (new web_server.ServerUtil()).itoa(slot));
+            return -1, fork_err;
         }
-        let rc = 0;
-        loop (let i = 0; i < hs.len(); i += 1) {
-            let one = join hs.get_unchecked(i);
-            if one != 0 {
-                rc = one;
+        if pid == 0 {
+            let child_rc = await self.run_child_worker();
+            return child_rc, OK;
+        }
+        return pid, OK;
+    }
+
+    // Finds the worker slot for an exited pid.
+    func find_worker_slot(self: web_server.WebServerApplication, pids: collections.Vector<Int>, pid: Int) -> Int {
+        loop (let i = 0; i < pids.len(); i += 1) {
+            if pids.get_unchecked(i) == pid {
+                return i;
             }
         }
-        return rc;
+        return -1;
     }
 
     // Serves using forked worker processes when configured, otherwise runs the
@@ -1257,35 +1314,63 @@ class WebServerApplication {
             return 10;
         }
         let workers = self.worker_processes;
-        let child_workers = workers - 1;
         let pids = new collections.Vector<Int>();
-        let can_fork = true;
-        loop (let wi = 0; wi < child_workers; wi += 1) {
-            if can_fork {
-                let pid, fork_err = os.fork();
-                if fork_err == OK {
-                    if pid == 0 {
-                        let child_rc = await self.run_worker_set();
-                        _ = self.close_listeners();
-                        _ = aio.fs.shutdown();
-                        _ = os.exit(child_rc);
-                        return child_rc;
-                    }
-                    _ = pids.push(pid);
+        let can_fork = workers > 1;
+        if can_fork {
+            loop (let wi = 0; wi < workers; wi += 1) {
+                let pid, fork_err = await self.fork_worker_slot(wi);
+                if fork_err != OK {
+                    _ = self.close_listeners();
+                    _ = aio.fs.shutdown();
+                    return 1;
+                }
+                _ = pids.push(pid);
+            }
+            let rc = 0;
+            let running = true;
+            loop running {
+                let exited_pid, wait_err = os.wait_any_pid();
+                let st = os.wait_any_status();
+                if wait_err != OK {
+                    rc = 1;
+                    running = false;
                 } else {
-                    can_fork = false;
+                    let slot = self.find_worker_slot(pids, exited_pid);
+                    if slot < 0 {
+                        print("egret-web-server: unknown child " + (new web_server.ServerUtil()).itoa(exited_pid) + " exited with status " + (new web_server.ServerUtil()).itoa(st));
+                    } else if self.max_requests > 0 {
+                        _ = pids.set(slot, 0);
+                        if st != 0 {
+                            rc = st;
+                        }
+                        let remaining = 0;
+                        loop (let pi = 0; pi < pids.len(); pi += 1) {
+                            if pids.get_unchecked(pi) > 0 {
+                                remaining += 1;
+                            }
+                        }
+                        if remaining == 0 {
+                            running = false;
+                        }
+                    } else {
+                        if st != 0 {
+                            print("egret-web-server: worker slot " + (new web_server.ServerUtil()).itoa(slot) + " exited with status " + (new web_server.ServerUtil()).itoa(st) + "; respawning");
+                        }
+                        let next_pid, next_err = await self.fork_worker_slot(slot);
+                        if next_err != OK {
+                            rc = 1;
+                            running = false;
+                        } else {
+                            _ = pids.set(slot, next_pid);
+                        }
+                    }
                 }
             }
+            _ = self.close_listeners();
+            _ = aio.fs.shutdown();
+            return rc;
         }
         let rc = await self.run_worker_set();
-        loop (let pi = 0; pi < pids.len(); pi += 1) {
-            let st, sterr = os.wait_pid(pids.get(pi));
-            if sterr != OK {
-                rc = 1;
-            } else if st != 0 {
-                rc = st;
-            }
-        }
         _ = self.close_listeners();
         _ = aio.fs.shutdown();
         return rc;

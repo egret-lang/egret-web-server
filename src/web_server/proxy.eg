@@ -44,10 +44,11 @@ class ReverseProxy {
         return out_req;
     }
 
-    // Sends one request to the upstream and returns either the upstream raw
-    // response or a generated 502 response when DNS/connection/response fails.
-    async func request(self: web_server.ReverseProxy, cfg: collections.Map<String, String>, req: web_server.HttpRequest, proxy_pass: String, path: String, keep_alive: Bool) -> String {
-        let util = new web_server.ServerUtil();
+    // Sends one request to the upstream using scalar limits already extracted
+    // from configuration. Keeping the immutable listener map out of this async
+    // frame avoids request-time map cloning and map handles crossing proxy I/O
+    // suspension points.
+    async func request_with_limits(self: web_server.ReverseProxy, req: web_server.HttpRequest, proxy_pass: String, path: String, keep_alive: Bool, timeout_ms: Int, max_bytes: Int) -> String {
         let factory = new web_server.HttpResponseFactory();
         let u, u_err = net.url.parse(self.target_url(proxy_pass, path));
         if u_err != OK {
@@ -55,8 +56,6 @@ class ReverseProxy {
         }
         let is_tls = u.scheme == "https";
         let out_req = self.rewrite_request(req, u.path);
-        let timeout_ms = util.cfg_int(cfg, "proxy_timeout_ms", DEFAULT_PROXY_TIMEOUT_MS);
-        let max_bytes = util.cfg_int(cfg, "max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES);
         let fd = 0;
         let err = OK;
         if is_tls {
@@ -76,11 +75,20 @@ class ReverseProxy {
         }
         let transport = new web_server.HttpTransport(fd, is_tls, timeout_ms);
         _ = await transport.send_all(out_req);
-        let resp = await transport.recv_all(max_bytes);
+        let resp = await transport.recv_response(max_bytes);
         _ = transport.close();
         if len(resp) == 0 {
             return factory.response_conn(502, "text/plain", "Bad Gateway", keep_alive);
         }
         return resp;
+    }
+
+    // Sends one request to the upstream and returns either the upstream raw
+    // response or a generated 502 response when DNS/connection/response fails.
+    async func request(self: web_server.ReverseProxy, cfg: collections.Map<String, String>, req: web_server.HttpRequest, proxy_pass: String, path: String, keep_alive: Bool) -> String {
+        let util = new web_server.ServerUtil();
+        let timeout_ms = util.cfg_int(cfg, "proxy_timeout_ms", DEFAULT_PROXY_TIMEOUT_MS);
+        let max_bytes = util.cfg_int(cfg, "max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES);
+        return await self.request_with_limits(req, proxy_pass, path, keep_alive, timeout_ms, max_bytes);
     }
 }

@@ -48,6 +48,10 @@ class StaticFileServer {
         let util = new web_server.ServerUtil();
         let factory = new web_server.HttpResponseFactory();
         let content_type = util.mime(disk);
+        let is_dir, dir_err = fs.stat_is_dir(disk);
+        if dir_err == OK && is_dir {
+            return factory.response_conn(404, "text/plain; charset=utf-8", "Not Found", keep_alive);
+        }
         let body, body_err = await aio.fs.read_text(disk);
         if body_err != OK {
             return factory.response_conn(500, "text/plain", "read error", keep_alive);
@@ -67,6 +71,10 @@ class StaticFileServer {
         let util = new web_server.ServerUtil();
         let factory = new web_server.HttpResponseFactory();
         let content_type = util.mime(disk);
+        let is_dir, dir_err = fs.stat_is_dir(disk);
+        if dir_err == OK && is_dir {
+            return factory.response_conn(404, "text/plain; charset=utf-8", "Not Found", keep_alive);
+        }
         let body, body_err = await aio.fs.read_text(disk);
         if body_err != OK {
             return factory.response_conn(500, "text/plain", "read error", keep_alive);
@@ -108,6 +116,10 @@ class StaticFileServer {
         let fallback_disk = self.try_path(cfg, cfg_base, loc, p, p);
         let fallback_exists, fallback_err = fs.exists(fallback_disk);
         if fallback_err == OK && fallback_exists {
+            let fallback_is_dir, fallback_dir_err = fs.stat_is_dir(fallback_disk);
+            if fallback_dir_err == OK && fallback_is_dir {
+                return "";
+            }
             return fallback_disk;
         }
         return "";
@@ -142,6 +154,10 @@ class StaticFileServer {
         let fallback_disk = self.try_path(cfg, cfg_base, loc, p, p);
         let fallback_exists, fallback_err = fs.exists(fallback_disk);
         if fallback_err == OK && fallback_exists {
+            let fallback_is_dir, fallback_dir_err = fs.stat_is_dir(fallback_disk);
+            if fallback_dir_err == OK && fallback_is_dir {
+                return factory.response_conn(404, "text/plain; charset=utf-8", "Not Found", keep_alive);
+            }
             return await self.serve_disk_file(cfg, cfg_base, req, fallback_disk, keep_alive);
         }
         return factory.response_conn(404, "text/plain; charset=utf-8", "Not Found", keep_alive);

@@ -233,6 +233,17 @@ class HttpTransport {
         return await tcp_stream.recv_all(max_total, self.timeout_ms);
     }
 
+    // Receives one complete upstream HTTP response without waiting for a
+    // keep-alive connection to close.
+    async func recv_response(self: web_server.HttpTransport, max_total: Int) -> String {
+        if self.is_tls {
+            let tls_stream = new web_server.HttpConnStream<web_server.TlsHttpConn>(new web_server.TlsHttpConn(self.fd));
+            return await tls_stream.recv_response(max_total, self.timeout_ms);
+        }
+        let tcp_stream = new web_server.HttpConnStream<web_server.TcpHttpConn>(new web_server.TcpHttpConn(self.fd));
+        return await tcp_stream.recv_response(max_total, self.timeout_ms);
+    }
+
     // Closes the selected transport.
     func close(self: web_server.HttpTransport) -> Void {
         if self.is_tls {
@@ -587,8 +598,13 @@ class HttpConnStream<T: web_server.HttpConn> {
     // Writes until all bytes have been accepted by the underlying transport.
     async func send_all(self: web_server.HttpConnStream<T>, data: String, timeout_ms: Int) -> Int {
         let off = 0;
-        loop off < len(data) {
-            let n, err = await web_server.HttpConn<T>.http_conn_send(self.conn, substr(data, off, len(data) - off), timeout_ms);
+        let data_len = len(data);
+        loop off < data_len {
+            let chunk_len = data_len - off;
+            if chunk_len > 16384 {
+                chunk_len = 16384;
+            }
+            let n, err = await web_server.HttpConn<T>.http_conn_send(self.conn, substr(data, off, chunk_len), timeout_ms);
             if err != OK {
                 return 1;
             }
@@ -614,6 +630,58 @@ class HttpConnStream<T: web_server.HttpConn> {
             out += chunk;
         }
         return out;
+    }
+
+    // Reads a full HTTP response by respecting protocol framing. This avoids
+    // waiting for EOF when an upstream keeps the connection alive after sending
+    // a response with Content-Length or chunked transfer encoding.
+    async func recv_response(self: web_server.HttpConnStream<T>, max_total: Int, timeout_ms: Int) -> String {
+        let parser = new web_server.HttpRequestParser();
+        let resp = await self.recv_until("\r\n\r\n", max_total, timeout_ms);
+        let sep = strings.find_substr(resp, "\r\n\r\n");
+        if sep < 0 {
+            return resp;
+        }
+        if parser.is_chunked(resp) {
+            loop !parser.chunked_body_complete(parser.raw_body(resp)) {
+                if len(resp) >= max_total {
+                    return resp;
+                }
+                let chunk, err = await web_server.HttpConn<T>.http_conn_recv(self.conn, 8192, timeout_ms);
+                if err != OK && err != ERR_EOF {
+                    return resp;
+                }
+                if len(chunk) == 0 {
+                    return resp;
+                }
+                resp += chunk;
+            }
+            return resp;
+        }
+        let content_len = parser.content_length(resp);
+        if content_len <= 0 {
+            return resp;
+        }
+        let body_start = sep + 4;
+        loop len(resp) < body_start + content_len {
+            if len(resp) >= max_total {
+                return resp;
+            }
+            let need = body_start + content_len - len(resp);
+            let want = need;
+            if want > 8192 {
+                want = 8192;
+            }
+            let chunk, err = await web_server.HttpConn<T>.http_conn_recv(self.conn, want, timeout_ms);
+            if err != OK && err != ERR_EOF {
+                return resp;
+            }
+            if len(chunk) == 0 {
+                return resp;
+            }
+            resp += chunk;
+        }
+        return resp;
     }
 
     // Closes the underlying transport adapter.
