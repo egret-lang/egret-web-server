@@ -2,7 +2,7 @@
 
 `egret-web-server` is a powerful and high-performance web server using egret-lang and powered by https://egret-lang.org.
 
-## Build & Run:
+## Build & Run（Linux & MacOS）:
 
 This software must be compiled with egret-lang compiler version 0.1.3 or later.If you haven't installed egret-lang yet, please install it first:
 ```sh
