@@ -26,9 +26,7 @@ class WebLogger {
         if err != OK {
             return;
         }
-        let written, write_err = fs.write_raw(h, line + "\n");
-        _ = written;
-        _ = write_err;
+        _, _ = fs.write_raw(h, line + "\n");
         _ = fs.close(h);
     }
 
