@@ -3,7 +3,6 @@
 
 module web_server;
 
-use web_server;
 use collections;
 use fs;
 use strconv;

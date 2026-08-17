@@ -3,7 +3,6 @@
 
 module web_server;
 
-use web_server;
 use aio.fs;
 use collections;
 use fs;
