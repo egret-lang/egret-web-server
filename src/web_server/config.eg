@@ -276,6 +276,10 @@ class ConfigDsl {
         _ = cfg.set("https_redirect", "on");
         _ = cfg.set("ssl_certificate", "");
         _ = cfg.set("ssl_certificate_key", "");
+        _ = cfg.set("access_log", self.util.cfg_get(cfg, "http_access_log", self.util.cfg_get(cfg, "access_log", DEFAULT_ACCESS_LOG)));
+        _ = cfg.set("access_log_format", self.util.cfg_get(cfg, "http_access_log_format", self.util.cfg_get(cfg, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT)));
+        _ = cfg.set("error_log", self.util.cfg_get(cfg, "http_error_log", self.util.cfg_get(cfg, "error_log", DEFAULT_ERROR_LOG)));
+        _ = cfg.set("error_log_level", self.util.cfg_get(cfg, "http_error_log_level", self.util.cfg_get(cfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL)));
         _ = cfg.set("loc_count", "0");
         _ = cfg.set("rewrite_count", "0");
     }
@@ -370,6 +374,80 @@ class ConfigDsl {
         return i;
     }
 
+    // Parses "log_format name part..." and concatenates adjacent quoted parts
+    // exactly like nginx does for split format strings.
+    func remember_log_format(self: web_server.ConfigDsl, cfg: collections.Map<String, String>, name: String, fmt: String) -> Void {
+        let count = self.util.cfg_int(cfg, "log_format_count", 0);
+        let found = false;
+        loop (let i = 0; i < count; i += 1) {
+            if self.util.cfg_get(cfg, "log_format." + strconv.itoa(i) + ".name", "") == name {
+                found = true;
+            }
+        }
+        if !found {
+            _ = cfg.set("log_format." + strconv.itoa(count) + ".name", name);
+            _ = cfg.set("log_format_count", strconv.itoa(count + 1));
+        }
+        _ = cfg.set("log_format." + name, fmt);
+    }
+
+    func parse_log_format_stmt(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+        if i + 1 >= ts.len() {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        let name = ts.get(i + 1);
+        let fmt = "";
+        i += 2;
+        loop i < ts.len() {
+            let t = ts.get(i);
+            if t == ";" {
+                self.remember_log_format(cfg, name, fmt);
+                return i + 1;
+            }
+            if t == "{" {
+                return self.cursor.skip_stmt(ts, i);
+            }
+            fmt += t;
+            i += 1;
+        }
+        self.remember_log_format(cfg, name, fmt);
+        return i;
+    }
+
+    // Parses nginx-style "access_log path [format]" plus "access_log off".
+    func parse_access_log_stmt(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+        let path = self.cursor.val(ts, i, DEFAULT_ACCESS_LOG);
+        if path == DISABLED_TEXT {
+            _ = cfg.set("access_log", DISABLED_TEXT);
+            _ = cfg.set("access_log_format", DEFAULT_ACCESS_LOG_FORMAT);
+            return self.cursor.consume(ts, i);
+        }
+        _ = cfg.set("access_log", path);
+        if i + 2 < ts.len() && ts.get(i + 2) != ";" {
+            _ = cfg.set("access_log_format", ts.get(i + 2));
+        } else {
+            _ = cfg.set("access_log_format", DEFAULT_ACCESS_LOG_FORMAT);
+        }
+        return self.cursor.consume(ts, i);
+    }
+
+    // Parses nginx-style "error_log path [level]" plus "error_log off".
+    func parse_error_log_stmt(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+        let path = self.cursor.val(ts, i, DEFAULT_ERROR_LOG);
+        if path == DISABLED_TEXT {
+            _ = cfg.set("error_log", DISABLED_TEXT);
+            _ = cfg.set("error_log_level", DEFAULT_ERROR_LOG_LEVEL);
+            return self.cursor.consume(ts, i);
+        }
+        _ = cfg.set("error_log", path);
+        if i + 2 < ts.len() && ts.get(i + 2) != ";" {
+            _ = cfg.set("error_log_level", strings.to_lower_ascii(ts.get(i + 2)));
+        } else {
+            _ = cfg.set("error_log_level", DEFAULT_ERROR_LOG_LEVEL);
+        }
+        return self.cursor.consume(ts, i);
+    }
+
     // Ensures each server has a fallback prefix "/" location.
     func ensure_default_location(self: web_server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
         if self.util.cfg_int(cfg, "loc_count", 0) != 0 {
@@ -409,6 +487,10 @@ class ConfigDsl {
         _ = cfg.set(self.keys.server_key(server_idx, ".ssl_certificate"), self.util.cfg_get(cfg, "ssl_certificate", ""));
         _ = cfg.set(self.keys.server_key(server_idx, ".ssl_certificate_key"), self.util.cfg_get(cfg, "ssl_certificate_key", ""));
         _ = cfg.set(self.keys.server_key(server_idx, ".https_redirect"), self.util.cfg_get(cfg, "https_redirect", DEFAULT_HTTPS_REDIRECT));
+        _ = cfg.set(self.keys.server_key(server_idx, ".access_log"), self.util.cfg_get(cfg, "access_log", DEFAULT_ACCESS_LOG));
+        _ = cfg.set(self.keys.server_key(server_idx, ".access_log_format"), self.util.cfg_get(cfg, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT));
+        _ = cfg.set(self.keys.server_key(server_idx, ".error_log"), self.util.cfg_get(cfg, "error_log", DEFAULT_ERROR_LOG));
+        _ = cfg.set(self.keys.server_key(server_idx, ".error_log_level"), self.util.cfg_get(cfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
         let listen_count = self.util.cfg_int(cfg, "listen_count", 0);
         _ = cfg.set(self.keys.server_key(server_idx, ".listen_count"), strconv.itoa(listen_count));
         loop (let li = 0; li < listen_count; li += 1) {
@@ -476,6 +558,17 @@ class ConfigDsl {
         _ = out.set("ssl_certificate", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".ssl_certificate"), ""));
         _ = out.set("ssl_certificate_key", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".ssl_certificate_key"), ""));
         _ = out.set("https_redirect", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".https_redirect"), DEFAULT_HTTPS_REDIRECT));
+        _ = out.set("access_log", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".access_log"), DEFAULT_ACCESS_LOG));
+        _ = out.set("access_log_format", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".access_log_format"), DEFAULT_ACCESS_LOG_FORMAT));
+        _ = out.set("error_log", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".error_log"), DEFAULT_ERROR_LOG));
+        _ = out.set("error_log_level", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".error_log_level"), DEFAULT_ERROR_LOG_LEVEL));
+        let log_format_count = self.util.cfg_int(cfg, "log_format_count", 0);
+        _ = out.set("log_format_count", strconv.itoa(log_format_count));
+        loop (let lfi = 0; lfi < log_format_count; lfi += 1) {
+            let name = self.util.cfg_get(cfg, "log_format." + strconv.itoa(lfi) + ".name", "");
+            _ = out.set("log_format." + strconv.itoa(lfi) + ".name", name);
+            _ = out.set("log_format." + name, self.util.cfg_get(cfg, "log_format." + name, ""));
+        }
         _ = out.set("listen_host", self.util.cfg_get(cfg, self.keys.server_listen_key(server_idx, listen_idx, ".host"), DEFAULT_LISTEN_HOST));
         _ = out.set("listen_port", self.util.cfg_get(cfg, self.keys.server_listen_key(server_idx, listen_idx, ".port"), DEFAULT_LISTEN_PORT_TEXT));
         _ = out.set("backlog", self.util.cfg_get(cfg, self.keys.server_listen_key(server_idx, listen_idx, ".backlog"), DEFAULT_BACKLOG_TEXT));
@@ -858,6 +951,12 @@ class ConfigDsl {
                     _ = cfg.set("https_redirect", strings.to_lower_ascii(self.cursor.val(ts, i, DEFAULT_HTTPS_REDIRECT)));
                     i = self.cursor.consume(ts, i);
                 },
+                "access_log" => {
+                    i = self.parse_access_log_stmt(ts, i, cfg);
+                },
+                "error_log" => {
+                    i = self.parse_error_log_stmt(ts, i, cfg);
+                },
                 "location" => {
                     i = self.parse_location(ts, i, cfg, loc_count);
                     loc_count += 1;
@@ -956,6 +1055,19 @@ class ConfigDsl {
                     _ = cfg.set("gzip_min_length", strconv.itoa(self.util.parse_size(self.cursor.val(ts, i, ""), DEFAULT_GZIP_MIN_LENGTH)));
                     i = self.cursor.consume(ts, i);
                 },
+                "log_format" => {
+                    i = self.parse_log_format_stmt(ts, i, cfg);
+                },
+                "access_log" => {
+                    i = self.parse_access_log_stmt(ts, i, cfg);
+                    _ = cfg.set("http_access_log", self.util.cfg_get(cfg, "access_log", DEFAULT_ACCESS_LOG));
+                    _ = cfg.set("http_access_log_format", self.util.cfg_get(cfg, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT));
+                },
+                "error_log" => {
+                    i = self.parse_error_log_stmt(ts, i, cfg);
+                    _ = cfg.set("http_error_log", self.util.cfg_get(cfg, "error_log", DEFAULT_ERROR_LOG));
+                    _ = cfg.set("http_error_log_level", self.util.cfg_get(cfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
+                },
                 _ => {
                     i = self.cursor.skip_stmt(ts, i);
                 }
@@ -987,6 +1099,17 @@ class ConfigDsl {
         _ = cfg.set("https_redirect", DEFAULT_HTTPS_REDIRECT);
         _ = cfg.set("ssl_certificate", "");
         _ = cfg.set("ssl_certificate_key", "");
+        _ = cfg.set("log_format.main", DEFAULT_LOG_FORMAT_MAIN);
+        _ = cfg.set("log_format_count", "1");
+        _ = cfg.set("log_format.0.name", DEFAULT_ACCESS_LOG_FORMAT);
+        _ = cfg.set("access_log", DEFAULT_ACCESS_LOG);
+        _ = cfg.set("access_log_format", DEFAULT_ACCESS_LOG_FORMAT);
+        _ = cfg.set("error_log", DEFAULT_ERROR_LOG);
+        _ = cfg.set("error_log_level", DEFAULT_ERROR_LOG_LEVEL);
+        _ = cfg.set("http_access_log", DEFAULT_ACCESS_LOG);
+        _ = cfg.set("http_access_log_format", DEFAULT_ACCESS_LOG_FORMAT);
+        _ = cfg.set("http_error_log", DEFAULT_ERROR_LOG);
+        _ = cfg.set("http_error_log_level", DEFAULT_ERROR_LOG_LEVEL);
         _ = cfg.set("loc_count", "0");
         _ = cfg.set("rewrite_count", "0");
         _ = cfg.set("server_total", "0");
@@ -1096,6 +1219,11 @@ class ConfigParser {
                         _ = self.cfg.set("worker_processes", v);
                     }
                     i = self.dsl.cursor.consume(self.ts, i);
+                },
+                "error_log" => {
+                    i = self.dsl.parse_error_log_stmt(self.ts, i, self.cfg);
+                    _ = self.cfg.set("http_error_log", self.dsl.util.cfg_get(self.cfg, "error_log", DEFAULT_ERROR_LOG));
+                    _ = self.cfg.set("http_error_log_level", self.dsl.util.cfg_get(self.cfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
                 },
                 "events" => {
                     i = self.dsl.parse_events(self.ts, i + 1, self.cfg);

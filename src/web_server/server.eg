@@ -74,6 +74,20 @@ class ListenerRegistry {
     func init(self: web_server.ListenerRegistry) -> Void {
     }
 
+    func copy_log_formats(self: web_server.ListenerRegistry, src: collections.Map<String, String>, dst: collections.Map<String, String>) -> Void {
+        let util = new web_server.ServerUtil();
+        let count = util.cfg_int(src, "log_format_count", 0);
+        _ = dst.set("log_format_count", util.itoa(count));
+        loop (let i = 0; i < count; i += 1) {
+            let name_key = "log_format." + util.itoa(i) + ".name";
+            let name = util.cfg_get(src, name_key, "");
+            _ = dst.set(name_key, name);
+            if len(name) > 0 {
+                _ = dst.set("log_format." + name, util.cfg_get(src, "log_format." + name, ""));
+            }
+        }
+    }
+
     // Key that groups configs by network bind address and TLS mode.
     func bind_key_for(self: web_server.ListenerRegistry, cfg: collections.Map<String, String>) -> String {
         let util = new web_server.ServerUtil();
@@ -155,6 +169,10 @@ class ListenerRegistry {
         _ = listener.set(base + ".ssl_certificate", util.cfg_get(src, "ssl_certificate", ""));
         _ = listener.set(base + ".ssl_certificate_key", util.cfg_get(src, "ssl_certificate_key", ""));
         _ = listener.set(base + ".https_redirect", util.cfg_get(src, "https_redirect", DEFAULT_HTTPS_REDIRECT));
+        _ = listener.set(base + ".access_log", util.cfg_get(src, "access_log", DEFAULT_ACCESS_LOG));
+        _ = listener.set(base + ".access_log_format", util.cfg_get(src, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT));
+        _ = listener.set(base + ".error_log", util.cfg_get(src, "error_log", DEFAULT_ERROR_LOG));
+        _ = listener.set(base + ".error_log_level", util.cfg_get(src, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
         _ = listener.set(base + ".gzip", util.cfg_get(src, "gzip", DEFAULT_GZIP));
         _ = listener.set(base + ".gzip_min_length", util.cfg_get(src, "gzip_min_length", DEFAULT_GZIP_MIN_LENGTH_TEXT));
         if idx == 0 {
@@ -168,6 +186,10 @@ class ListenerRegistry {
             _ = listener.set("root", util.cfg_get(src, "root", "."));
             _ = listener.set("index", util.cfg_get(src, "index", DEFAULT_INDEX));
             _ = listener.set("https_redirect", util.cfg_get(src, "https_redirect", DEFAULT_HTTPS_REDIRECT));
+            _ = listener.set("access_log", util.cfg_get(src, "access_log", DEFAULT_ACCESS_LOG));
+            _ = listener.set("access_log_format", util.cfg_get(src, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT));
+            _ = listener.set("error_log", util.cfg_get(src, "error_log", DEFAULT_ERROR_LOG));
+            _ = listener.set("error_log_level", util.cfg_get(src, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
             _ = listener.set("gzip", util.cfg_get(src, "gzip", DEFAULT_GZIP));
             _ = listener.set("gzip_min_length", util.cfg_get(src, "gzip_min_length", DEFAULT_GZIP_MIN_LENGTH_TEXT));
         }
@@ -280,6 +302,11 @@ class ListenerRegistry {
         _ = l.set("https_enabled", util.cfg_get(scfg, "https_enabled", DEFAULT_HTTPS_ENABLED));
         _ = l.set("ssl_certificate", util.cfg_get(scfg, "ssl_certificate", ""));
         _ = l.set("ssl_certificate_key", util.cfg_get(scfg, "ssl_certificate_key", ""));
+        _ = l.set("access_log", util.cfg_get(scfg, "access_log", DEFAULT_ACCESS_LOG));
+        _ = l.set("access_log_format", util.cfg_get(scfg, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT));
+        _ = l.set("error_log", util.cfg_get(scfg, "error_log", DEFAULT_ERROR_LOG));
+        _ = l.set("error_log_level", util.cfg_get(scfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
+        self.copy_log_formats(scfg, l);
         _ = l.set("vhost_count", "0");
         _ = l.set("https_redirect_name_count", "0");
         _ = l.set("https_redirect_names", "|");
@@ -364,6 +391,20 @@ class MapCloner {
         }
     }
 
+    func copy_log_formats(self: web_server.MapCloner, src: collections.Map<String, String>, out: collections.Map<String, String>) -> Void {
+        let util = new web_server.ServerUtil();
+        let count = util.cfg_int(src, "log_format_count", 0);
+        _ = out.set("log_format_count", util.itoa(count));
+        loop (let i = 0; i < count; i += 1) {
+            let name_key = "log_format." + util.itoa(i) + ".name";
+            self.copy_if_present(src, out, name_key);
+            let name = util.cfg_get(src, name_key, "");
+            if len(name) > 0 {
+                self.copy_if_present(src, out, "log_format." + name);
+            }
+        }
+    }
+
     func copy_server_names(self: web_server.MapCloner, src: collections.Map<String, String>, out: collections.Map<String, String>, base: String) -> Void {
         let util = new web_server.ServerUtil();
         let count_key = util.cfg_key_at(base, "server_name_count");
@@ -432,6 +473,10 @@ class MapCloner {
         self.copy_if_present(src, out, util.cfg_key_at(base, "ssl_certificate"));
         self.copy_if_present(src, out, util.cfg_key_at(base, "ssl_certificate_key"));
         self.copy_if_present(src, out, util.cfg_key_at(base, "https_redirect"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "access_log"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "access_log_format"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "error_log"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "error_log_level"));
         self.copy_if_present(src, out, util.cfg_key_at(base, "gzip"));
         self.copy_if_present(src, out, util.cfg_key_at(base, "gzip_min_length"));
         self.copy_locations(src, out, base);
@@ -454,6 +499,7 @@ class MapCloner {
         self.copy_if_present(src, out, "https_enabled");
         self.copy_if_present(src, out, "ssl_certificate");
         self.copy_if_present(src, out, "ssl_certificate_key");
+        self.copy_log_formats(src, out);
         let redirect_count = util.cfg_int(src, "https_redirect_name_count", 0);
         _ = out.set("https_redirect_name_count", util.itoa(redirect_count));
         self.copy_if_present(src, out, "https_redirect_names");
@@ -880,6 +926,11 @@ class VirtualHostSelector {
         _ = out.set("ssl_certificate", util.cfg_get(self.listener, base + ".ssl_certificate", ""));
         _ = out.set("ssl_certificate_key", util.cfg_get(self.listener, base + ".ssl_certificate_key", ""));
         _ = out.set("https_redirect", util.cfg_get(self.listener, base + ".https_redirect", DEFAULT_HTTPS_REDIRECT));
+        _ = out.set("access_log", util.cfg_get(self.listener, base + ".access_log", util.cfg_get(self.listener, "access_log", DEFAULT_ACCESS_LOG)));
+        _ = out.set("access_log_format", util.cfg_get(self.listener, base + ".access_log_format", util.cfg_get(self.listener, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT)));
+        _ = out.set("error_log", util.cfg_get(self.listener, base + ".error_log", util.cfg_get(self.listener, "error_log", DEFAULT_ERROR_LOG)));
+        _ = out.set("error_log_level", util.cfg_get(self.listener, base + ".error_log_level", util.cfg_get(self.listener, "error_log_level", DEFAULT_ERROR_LOG_LEVEL)));
+        (new web_server.ListenerRegistry()).copy_log_formats(self.listener, out);
         _ = out.set("listen_host", util.cfg_get(self.listener, "listen_host", DEFAULT_LISTEN_HOST));
         _ = out.set("listen_port", util.cfg_get(self.listener, "listen_port", DEFAULT_LISTEN_PORT_TEXT));
         _ = out.set("backlog", util.cfg_get(self.listener, "backlog", DEFAULT_BACKLOG_TEXT));
@@ -967,7 +1018,7 @@ class ClientRequestTask {
 
     // Handles a client connection, including repeated requests on keep-alive.
     // Every valid request goes through RequestDispatcher.
-    async func handle(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, is_tls: Bool, cfd: Int) -> Int {
+    async func handle(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, is_tls: Bool, cfd: Int, logger: web_server.WebLogger) -> Int {
         let util = new web_server.ServerUtil();
         let max_body = util.cfg_int(listener, "client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE);
         let timeout_ms = util.cfg_int(listener, "keepalive_timeout_ms", DEFAULT_KEEPALIVE_TIMEOUT_MS);
@@ -981,16 +1032,21 @@ class ClientRequestTask {
             if len(req) == 0 {
                 open = false;
             } else if strings.find_substr(req, "\r\n\r\n") < 0 {
-                _ = await conn.send(factory.response_conn(400, "text/plain", "Bad Request", false));
+                let bad_response = factory.response_conn(400, "text/plain", "Bad Request", false);
+                _ = await conn.send(bad_response);
+                logger.write_error(listener, "info", "client sent an invalid HTTP request");
                 open = false;
             } else if len(req) >= max_body {
-                _ = await conn.send(factory.response_conn(413, "text/plain", "Payload Too Large", false));
+                let large_response = factory.response_conn(413, "text/plain", "Payload Too Large", false);
+                _ = await conn.send(large_response);
+                logger.write_error(listener, "warn", "client request body is larger than client_max_body_size");
                 open = false;
             } else {
                 let request = new web_server.HttpRequest(req);
                 let dispatcher = new web_server.RequestDispatcher();
                 let response = await dispatcher.dispatch(listener, conn, request, handled + 1 < keepalive_limit);
                 _ = await conn.send(response);
+                logger.write_access(listener, conn, request, response);
                 handled += 1;
                 if !dispatcher.keep_alive {
                     open = false;
@@ -1112,7 +1168,7 @@ class ServerListener {
     }
 
     // Handles one accepted client through RequestDispatcher.
-    async func handle(self: web_server.ServerListener, cfd: Int) -> Int {
+    async func handle(self: web_server.ServerListener, cfd: Int, logger: web_server.WebLogger) -> Int {
         let util = new web_server.ServerUtil();
         let max_body = util.cfg_int(self.listener, "client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE);
         let timeout_ms = util.cfg_int(self.listener, "keepalive_timeout_ms", DEFAULT_KEEPALIVE_TIMEOUT_MS);
@@ -1126,16 +1182,21 @@ class ServerListener {
             if len(req) == 0 {
                 open = false;
             } else if strings.find_substr(req, "\r\n\r\n") < 0 {
-                _ = await conn.send(factory.response_conn(400, "text/plain", "Bad Request", false));
+                let bad_response = factory.response_conn(400, "text/plain", "Bad Request", false);
+                _ = await conn.send(bad_response);
+                logger.write_error(self.listener, "info", "client sent an invalid HTTP request");
                 open = false;
             } else if len(req) >= max_body {
-                _ = await conn.send(factory.response_conn(413, "text/plain", "Payload Too Large", false));
+                let large_response = factory.response_conn(413, "text/plain", "Payload Too Large", false);
+                _ = await conn.send(large_response);
+                logger.write_error(self.listener, "warn", "client request body is larger than client_max_body_size");
                 open = false;
             } else {
                 let request = new web_server.HttpRequest(req);
                 let dispatcher = new web_server.RequestDispatcher();
                 let resp = await dispatcher.dispatch(self.listener, conn, request, handled + 1 < keepalive_limit);
                 _ = await conn.send(resp);
+                logger.write_access(self.listener, conn, request, resp);
                 handled += 1;
                 if !dispatcher.keep_alive {
                     open = false;
@@ -1149,7 +1210,7 @@ class ServerListener {
     // Accept loop for one worker. Connections are handled inline to avoid
     // keeping short-lived client futures in a generic runtime container across
     // TLS close/reload races.
-    async func worker_loop(self: web_server.ServerListener, max_requests: Int) -> Int {
+    async func worker_loop(self: web_server.ServerListener, max_requests: Int, logger: web_server.WebLogger) -> Int {
         let util = new web_server.ServerUtil();
         let accepted = 0;
         let serving = true;
@@ -1163,7 +1224,7 @@ class ServerListener {
         loop serving {
             let cfd, _ = await self.accept(accept_timeout_ms);
             if cfd > 0 {
-                _ = await (new web_server.ClientRequestTask()).handle(self.listener, self.is_tls, cfd);
+                _ = await (new web_server.ClientRequestTask()).handle(self.listener, self.is_tls, cfd, logger);
                 accepted += 1;
             }
             if max_requests > 0 && accepted >= max_requests {
@@ -1183,7 +1244,8 @@ class ServerListener {
             return 10;
         }
         self.is_tls = util.cfg_get(self.listener, "__is_tls", "0") == "1";
-        return await self.worker_loop(max_requests);
+        let logger = new web_server.WebLogger();
+        return await self.worker_loop(max_requests, logger);
     }
 }
 
@@ -1259,8 +1321,9 @@ class WebServerApplication {
         _ = worker_listener.pin();
         let listener = new web_server.ServerListener(worker_listener);
         let current = spawn listener.serve_open(self.max_requests);
-        let next_rc = await self.run_worker_listener_chain(li + 1);
+        let next = spawn self.run_worker_listener_chain(li + 1);
         let current_rc = join current;
+        let next_rc = join next;
         if current_rc != 0 {
             return current_rc;
         }

@@ -43,6 +43,11 @@ internal const DEFAULT_FASTCGI_PORT: Int = 9000;
 internal const DEFAULT_ACCEPT_TIMEOUT_MS: Int = 1000;
 internal const DEFAULT_KEEPALIVE_REQUEST_LIMIT: Int = 1000;
 internal const DEFAULT_GC_MAX_ADAPTIVE_THRESHOLD_BYTES: Int = 67108864;
+internal const DEFAULT_LOG_FORMAT_MAIN: String = "$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\" \"$http_x_forwarded_for\"";
+internal const DEFAULT_ACCESS_LOG: String = "off";
+internal const DEFAULT_ACCESS_LOG_FORMAT: String = "main";
+internal const DEFAULT_ERROR_LOG: String = "/var/log/egret-web-server/error.log";
+internal const DEFAULT_ERROR_LOG_LEVEL: String = "error";
 
 // Small utility layer for config lookup, unit parsing, location matching, path
 // normalization, and MIME detection. Keeping this logic centralized prevents

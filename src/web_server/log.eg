@@ -1,0 +1,143 @@
+// Copyright (c) 2026 Egret-lang.org
+// SPDX-License-Identifier: MIT
+
+module web_server;
+
+use aio.tcp;
+use aio.tls;
+use collections;
+use fs;
+use os;
+use std;
+use strings;
+use time;
+
+// Listener-lifecycle logger. Instances are created inside ServerListener
+// futures and are not passed through the worker spawn chain.
+class WebLogger {
+    func init(self: web_server.WebLogger) -> Void {
+    }
+
+    func append_line(self: web_server.WebLogger, path: String, line: String) -> Void {
+        if len(path) == 0 || path == DISABLED_TEXT {
+            return;
+        }
+        let h, err = fs.open(path, fs.flag_write() + fs.flag_create() + fs.flag_append(), 420);
+        if err != OK {
+            return;
+        }
+        let written, write_err = fs.write_raw(h, line + "\n");
+        _ = written;
+        _ = write_err;
+        _ = fs.close(h);
+    }
+
+    func level_value(self: web_server.WebLogger, level: String) -> Int {
+        return match strings.to_lower_ascii(level) {
+            "debug" => 0,
+            "info" => 1,
+            "notice" => 2,
+            "warn" => 3,
+            "error" => 4,
+            _ => 4,
+        };
+    }
+
+    func error_enabled(self: web_server.WebLogger, cfg: collections.Map<String, String>, level: String) -> Bool {
+        let util = new web_server.ServerUtil();
+        return self.level_value(level) >= self.level_value(util.cfg_get(cfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
+    }
+
+    func write_error(self: web_server.WebLogger, cfg: collections.Map<String, String>, level: String, message: String) -> Void {
+        if !self.error_enabled(cfg, level) {
+            return;
+        }
+        let util = new web_server.ServerUtil();
+        let ts, _ = time.date("%Y/%m/%d %H:%M:%S");
+        self.append_line(util.cfg_get(cfg, "error_log", DEFAULT_ERROR_LOG), ts + " [" + level + "] " + util.itoa(os.pid()) + ": " + message);
+    }
+
+    func first_line(self: web_server.WebLogger, s: String) -> String {
+        let p = strings.find_substr(s, "\r\n");
+        if p >= 0 {
+            return substr(s, 0, p);
+        }
+        return s;
+    }
+
+    func response_status(self: web_server.WebLogger, resp: String) -> String {
+        if len(resp) >= 12 && substr(resp, 0, 9) == "HTTP/1.1 " {
+            return substr(resp, 9, 3);
+        }
+        return "000";
+    }
+
+    func response_body_bytes(self: web_server.WebLogger, resp: String) -> String {
+        let marker = "\r\nContent-Length:";
+        let p = strings.find_substr_ascii_case(resp, marker);
+        if p >= 0 {
+            let start = p + len(marker);
+            let rest = substr(resp, start, len(resp) - start);
+            let e = strings.find_substr(rest, "\r\n");
+            if e >= 0 {
+                return strings.trim_space(substr(rest, 0, e));
+            }
+            return strings.trim_space(rest);
+        }
+        let header_end = strings.find_substr(resp, "\r\n\r\n");
+        if header_end >= 0 {
+            return (new web_server.ServerUtil()).itoa(len(resp) - header_end - 4);
+        }
+        return "0";
+    }
+
+    func remote_addr(self: web_server.WebLogger, conn: web_server.ClientConnection) -> String {
+        if conn.is_tls {
+            let host = aio.tls.peer_host(conn.fd);
+            if len(host) > 0 {
+                return host;
+            }
+        } else {
+            let host = aio.tcp.peer_host(conn.fd);
+            if len(host) > 0 {
+                return host;
+            }
+        }
+        return "-";
+    }
+
+    func format_line(self: web_server.WebLogger, format: String, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String) -> String {
+        let util = new web_server.ServerUtil();
+        let time_local, _ = time.date("%d/%b/%Y:%H:%M:%S %z");
+        let out = format;
+        out = strings.replace_all(out, "$remote_addr", self.remote_addr(conn));
+        out = strings.replace_all(out, "$remote_user", "-");
+        out = strings.replace_all(out, "$time_local", time_local);
+        out = strings.replace_all(out, "$request", self.first_line(req.raw));
+        out = strings.replace_all(out, "$status", self.response_status(resp));
+        out = strings.replace_all(out, "$body_bytes_sent", self.response_body_bytes(resp));
+        out = strings.replace_all(out, "$http_referer", req.header("referer"));
+        out = strings.replace_all(out, "$http_user_agent", req.header("user-agent"));
+        out = strings.replace_all(out, "$http_x_forwarded_for", req.header("x-forwarded-for"));
+        out = strings.replace_all(out, "$host", req.host());
+        if conn.is_tls {
+            out = strings.replace_all(out, "$scheme", "https");
+        } else {
+            out = strings.replace_all(out, "$scheme", "http");
+        }
+        out = strings.replace_all(out, "$pid", util.itoa(os.pid()));
+        return out;
+    }
+
+    func write_access(self: web_server.WebLogger, listener: collections.Map<String, String>, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String) -> Void {
+        let util = new web_server.ServerUtil();
+        let base = (new web_server.VirtualHostRouter(listener)).select_base(req, conn.sni);
+        let path = util.cfg_get_at(listener, base, "access_log", util.cfg_get(listener, "access_log", DEFAULT_ACCESS_LOG));
+        if len(path) == 0 || path == DISABLED_TEXT {
+            return;
+        }
+        let format_name = util.cfg_get_at(listener, base, "access_log_format", util.cfg_get(listener, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT));
+        let format = util.cfg_get(listener, "log_format." + format_name, util.cfg_get(listener, "log_format.main", DEFAULT_LOG_FORMAT_MAIN));
+        self.append_line(path, self.format_line(format, conn, req, resp));
+    }
+}
