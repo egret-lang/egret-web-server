@@ -15,19 +15,130 @@ use time;
 // Listener-lifecycle logger. Instances are created inside ServerListener
 // futures and are not passed through the worker spawn chain.
 class WebLogger {
+    var primary_cached_log_base_path: String;
+    var primary_cached_log_daily_path: String;
+    var primary_cached_log_handle: Int;
+    var secondary_cached_log_base_path: String;
+    var secondary_cached_log_daily_path: String;
+    var secondary_cached_log_handle: Int;
+
     func init(self: web_server.WebLogger) -> Void {
+        self.primary_cached_log_base_path = "";
+        self.primary_cached_log_daily_path = "";
+        self.primary_cached_log_handle = 0;
+        self.secondary_cached_log_base_path = "";
+        self.secondary_cached_log_daily_path = "";
+        self.secondary_cached_log_handle = 0;
+    }
+
+    func deinit(self: web_server.WebLogger) -> Void {
+        self.close();
+    }
+
+    func close_handle(self: web_server.WebLogger, h: Int) -> Void {
+        if h > 0 {
+            _ = fs.close(h);
+        }
+    }
+
+    func close(self: web_server.WebLogger) -> Void {
+        self.close_handle(self.primary_cached_log_handle);
+        self.close_handle(self.secondary_cached_log_handle);
+        self.primary_cached_log_base_path = "";
+        self.primary_cached_log_daily_path = "";
+        self.primary_cached_log_handle = 0;
+        self.secondary_cached_log_base_path = "";
+        self.secondary_cached_log_daily_path = "";
+        self.secondary_cached_log_handle = 0;
+    }
+
+    func dated_path(self: web_server.WebLogger, path: String) -> String {
+        let suffix, _ = time.date("%Y%m%d");
+        return path + "-" + suffix;
+    }
+
+    func open_handle(self: web_server.WebLogger, path: String) -> Int {
+        let h, err = fs.open(path, fs.flag_write() + fs.flag_create() + fs.flag_append(), 420);
+        if err != OK {
+            return 0;
+        }
+        return h;
+    }
+
+    func refresh_primary_cached_log(self: web_server.WebLogger, base: String, path: String) -> Int {
+        if self.primary_cached_log_handle > 0 {
+            _ = fs.close(self.primary_cached_log_handle);
+        }
+        let h = self.open_handle(path);
+        if h <= 0 {
+            self.primary_cached_log_base_path = "";
+            self.primary_cached_log_daily_path = "";
+            self.primary_cached_log_handle = 0;
+            return 0;
+        }
+        self.primary_cached_log_base_path = base;
+        self.primary_cached_log_daily_path = path;
+        self.primary_cached_log_handle = h;
+        return h;
+    }
+
+    func refresh_secondary_cached_log(self: web_server.WebLogger, base: String, path: String) -> Int {
+        if self.secondary_cached_log_handle > 0 {
+            _ = fs.close(self.secondary_cached_log_handle);
+        }
+        let h = self.open_handle(path);
+        if h <= 0 {
+            self.secondary_cached_log_base_path = "";
+            self.secondary_cached_log_daily_path = "";
+            self.secondary_cached_log_handle = 0;
+            return 0;
+        }
+        self.secondary_cached_log_base_path = base;
+        self.secondary_cached_log_daily_path = path;
+        self.secondary_cached_log_handle = h;
+        return h;
+    }
+
+    func cached_handle(self: web_server.WebLogger, base: String) -> Int {
+        let path = self.dated_path(base);
+        if self.primary_cached_log_base_path == base {
+            if self.primary_cached_log_handle > 0 && self.primary_cached_log_daily_path == path {
+                return self.primary_cached_log_handle;
+            }
+            return self.refresh_primary_cached_log(base, path);
+        }
+        if self.secondary_cached_log_base_path == base {
+            if self.secondary_cached_log_handle > 0 && self.secondary_cached_log_daily_path == path {
+                return self.secondary_cached_log_handle;
+            }
+            return self.refresh_secondary_cached_log(base, path);
+        }
+        if self.primary_cached_log_handle <= 0 {
+            return self.refresh_primary_cached_log(base, path);
+        }
+        if self.secondary_cached_log_handle <= 0 {
+            return self.refresh_secondary_cached_log(base, path);
+        }
+        let h = self.open_handle(path);
+        if h <= 0 {
+            return 0;
+        }
+        return 0 - h;
     }
 
     func append_line(self: web_server.WebLogger, path: String, line: String) -> Void {
         if len(path) == 0 || path == DISABLED_TEXT {
             return;
         }
-        let h, err = fs.open(path, fs.flag_write() + fs.flag_create() + fs.flag_append(), 420);
-        if err != OK {
+        let h = self.cached_handle(path);
+        if h <= 0 {
+            if h < 0 {
+                _, _ = fs.write_raw(0 - h, line + "\n");
+                _ = fs.close(0 - h);
+            }
             return;
         }
         _, _ = fs.write_raw(h, line + "\n");
-        _ = fs.close(h);
     }
 
     func level_value(self: web_server.WebLogger, level: String) -> Int {

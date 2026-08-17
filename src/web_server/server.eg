@@ -1245,7 +1245,9 @@ class ServerListener {
         }
         self.is_tls = util.cfg_get(self.listener, "__is_tls", "0") == "1";
         let logger = new web_server.WebLogger();
-        return await self.worker_loop(max_requests, logger);
+        let rc = await self.worker_loop(max_requests, logger);
+        logger.close();
+        return rc;
     }
 }
 
