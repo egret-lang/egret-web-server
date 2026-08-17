@@ -63,4 +63,4 @@ log "Build finished in $((build_end - build_start))s."
 log "Starting egret-web-server with ./conf/web.conf..."
 log "Listening URLs: http://127.0.0.1/index.html and https://127.0.0.1/index.html"
 log "Press Ctrl+C to stop the server."
-exec ./build/egret-web-server -c ./conf/web.conf
+exec sudo ./build/egret-web-server -c ./conf/web.conf
