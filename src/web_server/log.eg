@@ -12,12 +12,19 @@ use std;
 use strings;
 use time;
 
-// Listener-lifecycle logger. Instances are created inside ServerListener
-// futures and are not passed through the worker spawn chain.
+// Listener-lifecycle logger for nginx-like access_log, error_log, and
+// log_format directives. Each listener owns one instance so file handles can be
+// reused without passing logger objects through the worker spawn chain.
 class WebLogger {
+    // Primary cached file descriptor. This usually becomes the access log path,
+    // but the cache is path-driven rather than tied to a specific log type.
     var primary_cached_log_base_path: String;
     var primary_cached_log_daily_path: String;
     var primary_cached_log_handle: Int;
+
+    // Secondary cached descriptor for the common case where access and error
+    // logs point at different files. Extra paths are still supported with
+    // short-lived descriptors.
     var secondary_cached_log_base_path: String;
     var secondary_cached_log_daily_path: String;
     var secondary_cached_log_handle: Int;
@@ -35,12 +42,16 @@ class WebLogger {
         self.close();
     }
 
+    // Closes a native file handle when it is valid. Invalid or unopened slots
+    // are represented as zero and are ignored.
     func close_handle(self: web_server.WebLogger, h: Int) -> Void {
         if h > 0 {
             _ = fs.close(h);
         }
     }
 
+    // Releases all cached log descriptors. ServerListener calls this explicitly
+    // when the worker loop exits, while deinit keeps abnormal paths safe.
     func close(self: web_server.WebLogger) -> Void {
         self.close_handle(self.primary_cached_log_handle);
         self.close_handle(self.secondary_cached_log_handle);
@@ -52,11 +63,15 @@ class WebLogger {
         self.secondary_cached_log_handle = 0;
     }
 
+    // Converts a configured log path into the daily rotated path. For example,
+    // "access.log" becomes "access.log-20260817".
     func dated_path(self: web_server.WebLogger, path: String) -> String {
         let suffix, _ = time.date("%Y%m%d");
         return path + "-" + suffix;
     }
 
+    // Opens a log file in append mode, creating it when needed. The returned
+    // descriptor is intentionally raw so the logger can cache it.
     func open_handle(self: web_server.WebLogger, path: String) -> Int {
         let h, err = fs.open(path, fs.flag_write() + fs.flag_create() + fs.flag_append(), 420);
         if err != OK {
@@ -65,6 +80,8 @@ class WebLogger {
         return h;
     }
 
+    // Replaces the primary cache slot with the descriptor for the current daily
+    // path. This is used both on first open and when the date suffix changes.
     func refresh_primary_cached_log(self: web_server.WebLogger, base: String, path: String) -> Int {
         if self.primary_cached_log_handle > 0 {
             _ = fs.close(self.primary_cached_log_handle);
@@ -82,6 +99,8 @@ class WebLogger {
         return h;
     }
 
+    // Replaces the secondary cache slot. Keeping two slots avoids open/close
+    // churn for the normal access-log plus error-log configuration.
     func refresh_secondary_cached_log(self: web_server.WebLogger, base: String, path: String) -> Int {
         if self.secondary_cached_log_handle > 0 {
             _ = fs.close(self.secondary_cached_log_handle);
@@ -99,6 +118,9 @@ class WebLogger {
         return h;
     }
 
+    // Returns a reusable descriptor for the configured base path. Positive
+    // values are cached descriptors; negative values encode a transient
+    // descriptor that the caller must close after writing.
     func cached_handle(self: web_server.WebLogger, base: String) -> Int {
         let path = self.dated_path(base);
         if self.primary_cached_log_base_path == base {
@@ -126,6 +148,8 @@ class WebLogger {
         return 0 - h;
     }
 
+    // Appends one line to the daily log file. Disabled paths follow nginx's
+    // "off" semantics and are silently ignored.
     func append_line(self: web_server.WebLogger, path: String, line: String) -> Void {
         if len(path) == 0 || path == DISABLED_TEXT {
             return;
@@ -141,6 +165,8 @@ class WebLogger {
         _, _ = fs.write_raw(h, line + "\n");
     }
 
+    // Maps nginx error log levels to ordered numeric values so configured
+    // thresholds can be compared cheaply.
     func level_value(self: web_server.WebLogger, level: String) -> Int {
         return match strings.to_lower_ascii(level) {
             "debug" => 0,
@@ -152,11 +178,15 @@ class WebLogger {
         };
     }
 
+    // Checks whether an error event should be emitted under the configured
+    // error_log level for the current listener or virtual host.
     func error_enabled(self: web_server.WebLogger, cfg: collections.Map<String, String>, level: String) -> Bool {
         let util = new web_server.ServerUtil();
         return self.level_value(level) >= self.level_value(util.cfg_get(cfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
     }
 
+    // Writes a runtime error log entry with timestamp, level, process id, and
+    // message. The target file is also daily-rotated by append_line().
     func write_error(self: web_server.WebLogger, cfg: collections.Map<String, String>, level: String, message: String) -> Void {
         if !self.error_enabled(cfg, level) {
             return;
@@ -166,6 +196,7 @@ class WebLogger {
         self.append_line(util.cfg_get(cfg, "error_log", DEFAULT_ERROR_LOG), ts + " [" + level + "] " + util.itoa(os.pid()) + ": " + message);
     }
 
+    // Extracts the request line from a raw HTTP request buffer for $request.
     func first_line(self: web_server.WebLogger, s: String) -> String {
         let p = strings.find_substr(s, "\r\n");
         if p >= 0 {
@@ -174,6 +205,7 @@ class WebLogger {
         return s;
     }
 
+    // Extracts the three-digit status from a generated HTTP/1.1 response.
     func response_status(self: web_server.WebLogger, resp: String) -> String {
         if len(resp) >= 12 && substr(resp, 0, 9) == "HTTP/1.1 " {
             return substr(resp, 9, 3);
@@ -181,6 +213,8 @@ class WebLogger {
         return "000";
     }
 
+    // Computes $body_bytes_sent. Content-Length is preferred because it matches
+    // the HTTP payload size even when the response string also contains headers.
     func response_body_bytes(self: web_server.WebLogger, resp: String) -> String {
         let marker = "\r\nContent-Length:";
         let p = strings.find_substr_ascii_case(resp, marker);
@@ -200,6 +234,7 @@ class WebLogger {
         return "0";
     }
 
+    // Resolves $remote_addr from the active TCP or TLS connection.
     func remote_addr(self: web_server.WebLogger, conn: web_server.ClientConnection) -> String {
         if conn.is_tls {
             let host = aio.tls.peer_host(conn.fd);
@@ -215,6 +250,9 @@ class WebLogger {
         return "-";
     }
 
+    // Expands the supported nginx-style log_format variables into one access
+    // log line. Unknown variables remain untouched so future variables do not
+    // break older binaries.
     func format_line(self: web_server.WebLogger, format: String, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String) -> String {
         let util = new web_server.ServerUtil();
         let time_local, _ = time.date("%d/%b/%Y:%H:%M:%S %z");
@@ -238,6 +276,8 @@ class WebLogger {
         return out;
     }
 
+    // Selects the matching virtual host, resolves access_log and log_format
+    // inheritance, formats the request/response pair, and appends the line.
     func write_access(self: web_server.WebLogger, listener: collections.Map<String, String>, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String) -> Void {
         let util = new web_server.ServerUtil();
         let base = (new web_server.VirtualHostRouter(listener)).select_base(req, conn.sni);
