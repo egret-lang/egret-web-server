@@ -29,8 +29,12 @@ class FastcgiGateway {
     }
 
     // Builds the complete FastCGI parameter map for this request.
-    func params(self: web_server.FastcgiGateway, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: web_server.HttpRequest, path: String, client_fd: Int, is_tls: Bool) -> collections.Map<String, String> {
-        return (new web_server.FastcgiParamsBuilder()).params(cfg, cfg_base, loc, req, path, req.body(), self.remote_addr(client_fd, is_tls), self.remote_port(client_fd, is_tls));
+    func params(self: web_server.FastcgiGateway, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: web_server.HttpRequest, path: String, client_fd: Int, is_tls: Bool, client_remote_addr: String) -> collections.Map<String, String> {
+        let remote_addr = client_remote_addr;
+        if len(remote_addr) == 0 || remote_addr == "-" {
+            remote_addr = self.remote_addr(client_fd, is_tls);
+        }
+        return (new web_server.FastcgiParamsBuilder()).params(cfg, cfg_base, loc, req, path, req.body(), remote_addr, self.remote_port(client_fd, is_tls));
     }
 
     // Reverses the config-time escaping used to store Unix socket paths in the
@@ -71,10 +75,10 @@ class FastcgiGateway {
 
     // Executes one FastCGI request and returns a generated 502/500 on upstream
     // or protocol failure.
-    async func request(self: web_server.FastcgiGateway, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: web_server.HttpRequest, path: String, keep_alive: Bool, client_fd: Int, is_tls: Bool, pass: String) -> String {
+    async func request(self: web_server.FastcgiGateway, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, req: web_server.HttpRequest, path: String, keep_alive: Bool, client_fd: Int, is_tls: Bool, client_remote_addr: String, pass: String) -> String {
         let endpoint = new web_server.FastcgiEndpoint(pass);
         let body = req.body();
-        let params = self.params(cfg, cfg_base, loc, req, path, client_fd, is_tls);
+        let params = self.params(cfg, cfg_base, loc, req, path, client_fd, is_tls, client_remote_addr);
         let util = new web_server.ServerUtil();
         let keys = new web_server.ConfigKeys();
         let factory = new web_server.HttpResponseFactory();
