@@ -10,9 +10,9 @@ use std;
 use strings;
 use time;
 
-// Listener-lifecycle logger for nginx-like access_log, error_log, and
-// log_format directives. Each listener owns one instance so file handles can be
-// reused without passing logger objects through the worker spawn chain.
+// Connection-task logger for nginx-like access_log, error_log, and log_format
+// directives. The logger owns mutable buffers and file descriptors, so it must
+// not be shared by concurrent client tasks.
 class WebLogger {
     // Primary cached file descriptor. This usually becomes the access log path,
     // but the cache is path-driven rather than tied to a specific log type.
@@ -26,6 +26,16 @@ class WebLogger {
     var secondary_cached_log_base_path: String;
     var secondary_cached_log_daily_path: String;
     var secondary_cached_log_handle: Int;
+    var primary_log_buffer: String;
+    var secondary_log_buffer: String;
+    var primary_log_buffer_second: Int;
+    var secondary_log_buffer_second: Int;
+    // Cached formatted timestamps. Access logging can run thousands of times
+    // per second, so formatting wall-clock strings on every request is wasteful.
+    var cached_access_log_second: Int;
+    var cached_access_log_time: String;
+    var cached_daily_suffix_second: Int;
+    var cached_daily_suffix: String;
 
     func init(self: web_server.WebLogger) -> Void {
         self.primary_cached_log_base_path = "";
@@ -34,6 +44,14 @@ class WebLogger {
         self.secondary_cached_log_base_path = "";
         self.secondary_cached_log_daily_path = "";
         self.secondary_cached_log_handle = 0;
+        self.primary_log_buffer = "";
+        self.secondary_log_buffer = "";
+        self.primary_log_buffer_second = 0;
+        self.secondary_log_buffer_second = 0;
+        self.cached_access_log_second = 0;
+        self.cached_access_log_time = "";
+        self.cached_daily_suffix_second = 0;
+        self.cached_daily_suffix = "";
     }
 
     func deinit(self: web_server.WebLogger) -> Void {
@@ -51,6 +69,7 @@ class WebLogger {
     // Releases all cached log descriptors. ServerListener calls this explicitly
     // when the worker loop exits, while deinit keeps abnormal paths safe.
     func close(self: web_server.WebLogger) -> Void {
+        self.flush_all();
         self.close_handle(self.primary_cached_log_handle);
         self.close_handle(self.secondary_cached_log_handle);
         self.primary_cached_log_base_path = "";
@@ -59,13 +78,134 @@ class WebLogger {
         self.secondary_cached_log_base_path = "";
         self.secondary_cached_log_daily_path = "";
         self.secondary_cached_log_handle = 0;
+        self.primary_log_buffer = "";
+        self.secondary_log_buffer = "";
+        self.primary_log_buffer_second = 0;
+        self.secondary_log_buffer_second = 0;
+        self.cached_access_log_second = 0;
+        self.cached_access_log_time = "";
+        self.cached_daily_suffix_second = 0;
+        self.cached_daily_suffix = "";
+    }
+
+    func flush_primary(self: web_server.WebLogger) -> Void {
+        if self.primary_cached_log_handle > 0 && len(self.primary_log_buffer) > 0 {
+            _, _ = fs.write_raw(self.primary_cached_log_handle, self.primary_log_buffer);
+        }
+        self.primary_log_buffer = "";
+        self.primary_log_buffer_second = 0;
+    }
+
+    func flush_secondary(self: web_server.WebLogger) -> Void {
+        if self.secondary_cached_log_handle > 0 && len(self.secondary_log_buffer) > 0 {
+            _, _ = fs.write_raw(self.secondary_cached_log_handle, self.secondary_log_buffer);
+        }
+        self.secondary_log_buffer = "";
+        self.secondary_log_buffer_second = 0;
+    }
+
+    func flush_all(self: web_server.WebLogger) -> Void {
+        self.flush_primary();
+        self.flush_secondary();
+    }
+
+    // Pads an integer with a leading zero for date/time fields.
+    func two_digits(self: web_server.WebLogger, n: Int) -> String {
+        if n < 10 {
+            return "0" + (new web_server.ServerUtil()).itoa(n);
+        }
+        return (new web_server.ServerUtil()).itoa(n);
+    }
+
+    // Formats Unix seconds for nginx-style access logs without calling the C
+    // strftime path on the hot access-log path.
+    func access_time_from_unix(self: web_server.WebLogger, unix_sec: Int) -> String {
+        let shifted = unix_sec + 28800;
+        let days = shifted / 86400;
+        let seconds_of_day = shifted - days * 86400;
+        let hour = seconds_of_day / 3600;
+        let minute = (seconds_of_day - hour * 3600) / 60;
+        let second = seconds_of_day - hour * 3600 - minute * 60;
+        let z = days + 719468;
+        let era = z / 146097;
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let year = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = mp + 3;
+        if month > 12 {
+            month -= 12;
+            year += 1;
+        }
+        return self.two_digits(day)
+        + "/"
+        + self.month_name(month)
+        + "/"
+        + (new web_server.ServerUtil()).itoa(year)
+        + ":"
+        + self.two_digits(hour)
+        + ":"
+        + self.two_digits(minute)
+        + ":"
+        + self.two_digits(second)
+        + " +0800";
+    }
+
+    // Formats the daily rotation suffix without using the shared date formatter.
+    func daily_suffix_from_unix(self: web_server.WebLogger, unix_sec: Int) -> String {
+        let shifted = unix_sec + 28800;
+        let days = shifted / 86400;
+        let z = days + 719468;
+        let era = z / 146097;
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let year = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = mp + 3;
+        if month > 12 {
+            month -= 12;
+            year += 1;
+        }
+        return (new web_server.ServerUtil()).itoa(year) + self.two_digits(month) + self.two_digits(day);
+    }
+
+    // Returns the short English month name used by nginx-style access logs.
+    func month_name(self: web_server.WebLogger, month: Int) -> String {
+        return match month {
+            1 => "Jan",
+            2 => "Feb",
+            3 => "Mar",
+            4 => "Apr",
+            5 => "May",
+            6 => "Jun",
+            7 => "Jul",
+            8 => "Aug",
+            9 => "Sep",
+            10 => "Oct",
+            11 => "Nov",
+            12 => "Dec",
+            _ => "Jan",
+        };
+    }
+
+    // Returns the access-log timestamp, refreshing at most once per second.
+    func access_log_time(self: web_server.WebLogger) -> String {
+        return self.access_time_from_unix(time.unix_sec());
+    }
+
+    // Returns the daily file-name suffix, refreshing at most once per second.
+    func daily_suffix(self: web_server.WebLogger) -> String {
+        return self.daily_suffix_from_unix(time.unix_sec());
     }
 
     // Converts a configured log path into the daily rotated path. For example,
     // "access.log" becomes "access.log-20260817".
     func dated_path(self: web_server.WebLogger, path: String) -> String {
-        let suffix, _ = time.date("%Y%m%d");
-        return path + "-" + suffix;
+        return path + "-" + self.daily_suffix();
     }
 
     // Opens a log file in append mode, creating it when needed. The returned
@@ -82,6 +222,7 @@ class WebLogger {
     // path. This is used both on first open and when the date suffix changes.
     func refresh_primary_cached_log(self: web_server.WebLogger, base: String, path: String) -> Int {
         if self.primary_cached_log_handle > 0 {
+            self.flush_primary();
             _ = fs.close(self.primary_cached_log_handle);
         }
         let h = self.open_handle(path);
@@ -101,6 +242,7 @@ class WebLogger {
     // churn for the normal access-log plus error-log configuration.
     func refresh_secondary_cached_log(self: web_server.WebLogger, base: String, path: String) -> Int {
         if self.secondary_cached_log_handle > 0 {
+            self.flush_secondary();
             _ = fs.close(self.secondary_cached_log_handle);
         }
         let h = self.open_handle(path);
@@ -160,7 +302,36 @@ class WebLogger {
             }
             return;
         }
-        _, _ = fs.write_raw(h, line + "\n");
+        self.buffer_line(h, line + "\n");
+    }
+
+    // Buffers log lines in memory and flushes by size or once per second. This
+    // preserves ordering per worker and reduces write syscalls on hot access
+    // log paths.
+    func buffer_line(self: web_server.WebLogger, h: Int, line: String) -> Void {
+        let now = time.unix_sec();
+        let limit = 65536;
+        if h == self.primary_cached_log_handle {
+            if self.primary_log_buffer_second == 0 {
+                self.primary_log_buffer_second = now;
+            }
+            self.primary_log_buffer += line;
+            if len(self.primary_log_buffer) >= limit || now != self.primary_log_buffer_second {
+                self.flush_primary();
+            }
+            return;
+        }
+        if h == self.secondary_cached_log_handle {
+            if self.secondary_log_buffer_second == 0 {
+                self.secondary_log_buffer_second = now;
+            }
+            self.secondary_log_buffer += line;
+            if len(self.secondary_log_buffer) >= limit || now != self.secondary_log_buffer_second {
+                self.flush_secondary();
+            }
+            return;
+        }
+        _, _ = fs.write_raw(h, line);
     }
 
     // Maps nginx error log levels to ordered numeric values so configured
@@ -247,7 +418,7 @@ class WebLogger {
     // break older binaries.
     func format_line(self: web_server.WebLogger, format: String, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String) -> String {
         let util = new web_server.ServerUtil();
-        let time_local, _ = time.date("%d/%b/%Y:%H:%M:%S %z");
+        let time_local = self.access_log_time();
         let out = format;
         out = strings.replace_all(out, "$remote_addr", self.remote_addr(conn));
         out = strings.replace_all(out, "$remote_user", "-");
@@ -268,17 +439,55 @@ class WebLogger {
         return out;
     }
 
+    // Fast path for the default "main" log_format. It avoids the generic
+    // replace-all pipeline and uses status/body values already derived by the
+    // caller from the generated response.
+    func format_main_line(self: web_server.WebLogger, conn: web_server.ClientConnection, req: web_server.HttpRequest, status: String, body_bytes: String) -> String {
+        return self.remote_addr(conn)
+        + " - - ["
+        + self.access_log_time()
+        + "] \""
+        + self.first_line(req.raw)
+        + "\" "
+        + status
+        + " "
+        + body_bytes
+        + " \""
+        + req.header("referer")
+        + "\" \""
+        + req.header("user-agent")
+        + "\" \""
+        + req.header("x-forwarded-for")
+        + "\"";
+    }
+
     // Selects the matching virtual host, resolves access_log and log_format
     // inheritance, formats the request/response pair, and appends the line.
     func write_access(self: web_server.WebLogger, listener: collections.Map<String, String>, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String) -> Void {
-        let util = new web_server.ServerUtil();
+        self.write_access_meta(listener, conn, req, resp, self.response_status(resp), self.response_body_bytes(resp));
+    }
+
+    // Same as write_access(), but accepts response metadata that hot paths may
+    // already have, avoiding repeated scans of the serialized response buffer.
+    func write_access_meta(self: web_server.WebLogger, listener: collections.Map<String, String>, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String, status: String, body_bytes: String) -> Void {
         let base = (new web_server.VirtualHostRouter(listener)).select_base(req, conn.sni);
+        self.write_access_meta_at(listener, base, conn, req, resp, status, body_bytes);
+    }
+
+    // Writes access logs when the caller already knows the selected config
+    // base. This is the hot path used by request dispatch.
+    func write_access_meta_at(self: web_server.WebLogger, listener: collections.Map<String, String>, base: String, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String, status: String, body_bytes: String) -> Void {
+        let util = new web_server.ServerUtil();
         let path = util.cfg_get_at(listener, base, "access_log", util.cfg_get(listener, "access_log", DEFAULT_ACCESS_LOG));
         if len(path) == 0 || path == DISABLED_TEXT {
             return;
         }
         let format_name = util.cfg_get_at(listener, base, "access_log_format", util.cfg_get(listener, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT));
         let format = util.cfg_get(listener, "log_format." + format_name, util.cfg_get(listener, "log_format.main", DEFAULT_LOG_FORMAT_MAIN));
-        self.append_line(path, self.format_line(format, conn, req, resp));
+        if format == DEFAULT_LOG_FORMAT_MAIN {
+            self.append_line(path, self.format_main_line(conn, req, status, body_bytes));
+        } else {
+            self.append_line(path, self.format_line(format, conn, req, resp));
+        }
     }
 }

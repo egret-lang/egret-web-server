@@ -9,12 +9,164 @@ use fs;
 use strconv;
 use strings;
 use std;
+use time;
+
+class StaticSendfilePlan {
+    var header: String;
+    var source_handle: Int;
+    var body_size: Int;
+
+    func init(self: web_server.StaticSendfilePlan, header: String = "", source_handle: Int = 0, body_size: Int = 0) -> Void {
+        self.header = header;
+        self.source_handle = source_handle;
+        self.body_size = body_size;
+    }
+
+    func deinit(self: web_server.StaticSendfilePlan) -> Void {
+    }
+}
 
 // Static file backend for locations without proxy_pass or FastCGI. It maps a
 // request path through root/alias/try_files rules, reads the file from disk, and
 // optionally gzip-encodes compressible responses.
 class StaticFileServer {
     func init(self: web_server.StaticFileServer) -> Void {
+    }
+
+    // Builds the per-listener cache key used for pre-rendered static responses.
+    // The base is part of the key because virtual hosts may map the same path to
+    // different roots or aliases.
+    func response_cache_key(self: web_server.StaticFileServer, cfg_base: String, path: String, keep_alive: Bool) -> String {
+        if keep_alive {
+            return "__static_response_cache." + cfg_base + "." + path + ".keep_alive";
+        }
+        return "__static_response_cache." + cfg_base + "." + path + ".close";
+    }
+
+    func cache_meta_key(self: web_server.StaticFileServer, cfg_base: String, path: String, name: String) -> String {
+        return "__static_response_cache." + cfg_base + "." + path + "." + name;
+    }
+
+    func stat_token(self: web_server.StaticFileServer, disk: String) -> String, ErrCode {
+        let size, size_err = fs.stat_size(disk);
+        if size_err != OK {
+            return "", size_err;
+        }
+        let mtime, mtime_err = fs.stat_mtime(disk);
+        if mtime_err != OK {
+            return "", mtime_err;
+        }
+        let mtime_nsec, nsec_err = fs.stat_mtime_nsec(disk);
+        if nsec_err != OK {
+            return "", nsec_err;
+        }
+        let util = new web_server.ServerUtil();
+        return util.itoa(size) + ":" + util.itoa(mtime) + ":" + util.itoa(mtime_nsec), OK;
+    }
+
+    func cached_file_is_fresh(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, path: String) -> Bool {
+        let util = new web_server.ServerUtil();
+        let checked_second_key = self.cache_meta_key(cfg_base, path, "checked_second");
+        let now = time.unix_sec();
+        if now == util.atoi_or(cfg.get(checked_second_key), -1) {
+            return true;
+        }
+        let disk = cfg.get(self.cache_meta_key(cfg_base, path, "disk"));
+        if len(disk) == 0 {
+            return false;
+        }
+        let token, stat_err = self.stat_token(disk);
+        if stat_err != OK {
+            return false;
+        }
+        return token == cfg.get(self.cache_meta_key(cfg_base, path, "stat_token"));
+    }
+
+    // Returns a pre-rendered identity response for hot exact static locations.
+    // Gzip-capable requests bypass this cache because their response body and
+    // headers depend on Accept-Encoding.
+    func cached_response(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: web_server.HttpRequest, path: String, keep_alive: Bool) -> String {
+        if req.accepts_gzip() {
+            return "";
+        }
+        if !self.cached_file_is_fresh(cfg, cfg_base, path) {
+            return "";
+        }
+        let key = self.response_cache_key(cfg_base, path, keep_alive);
+        if cfg.has(key) {
+            return cfg.get(key);
+        }
+        return "";
+    }
+
+    // Stores both connection-mode variants so the request path only performs a
+    // single map lookup before writing the already-rendered response bytes.
+    func store_cached_response(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, path: String, disk: String, content_type: String, body: String) -> Void {
+        let factory = new web_server.HttpResponseFactory();
+        let util = new web_server.ServerUtil();
+        let token, stat_err = self.stat_token(disk);
+        if stat_err != OK {
+            return;
+        }
+        let size, size_err = fs.stat_size(disk);
+        if size_err != OK {
+            return;
+        }
+        _ = cfg.set(self.cache_meta_key(cfg_base, path, "disk"), disk);
+        _ = cfg.set(self.cache_meta_key(cfg_base, path, "content_type"), content_type);
+        _ = cfg.set(self.cache_meta_key(cfg_base, path, "size"), util.itoa(size));
+        _ = cfg.set(self.cache_meta_key(cfg_base, path, "stat_token"), token);
+        _ = cfg.set(self.cache_meta_key(cfg_base, path, "checked_second"), util.itoa(time.unix_sec()));
+        _ = cfg.set(self.response_cache_key(cfg_base, path, true), factory.response_extra(200, content_type, body, true, ""));
+        _ = cfg.set(self.response_cache_key(cfg_base, path, false), factory.response_extra(200, content_type, body, false, ""));
+    }
+
+    async func refresh_cached_response(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, path: String) -> String {
+        let disk = cfg.get(self.cache_meta_key(cfg_base, path, "disk"));
+        if len(disk) == 0 {
+            return "";
+        }
+        let body, body_err = await aio.fs.read_text(disk);
+        if body_err != OK {
+            return "";
+        }
+        self.store_cached_response(cfg, cfg_base, path, disk, (new web_server.ServerUtil()).mime(disk), body);
+        return cfg.get(self.response_cache_key(cfg_base, path, false));
+    }
+
+    async func cached_or_refreshed_response(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: web_server.HttpRequest, path: String, keep_alive: Bool) -> String {
+        let cached = self.cached_response(cfg, cfg_base, req, path, keep_alive);
+        if len(cached) > 0 {
+            return cached;
+        }
+        if req.accepts_gzip() {
+            return "";
+        }
+        return "";
+    }
+
+    // Builds the HTTP header plus a per-request source file handle for a kernel
+    // sendfile response. The caller must close the returned source handle.
+    func cached_sendfile_response(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: web_server.HttpRequest, path: String, keep_alive: Bool) -> web_server.StaticSendfilePlan {
+        if keep_alive || req.accepts_gzip() || req.method() != "GET" {
+            return new web_server.StaticSendfilePlan();
+        }
+        if !self.cached_file_is_fresh(cfg, cfg_base, path) {
+            return new web_server.StaticSendfilePlan();
+        }
+        let util = new web_server.ServerUtil();
+        let size = util.atoi_or(cfg.get(self.cache_meta_key(cfg_base, path, "size")), -1);
+        let disk = cfg.get(self.cache_meta_key(cfg_base, path, "disk"));
+        if len(disk) == 0 || size < 0 {
+            return new web_server.StaticSendfilePlan();
+        }
+        let source_handle, source_err = fs.open(disk, fs.flag_read(), 420);
+        if source_err != OK || source_handle <= 0 {
+            return new web_server.StaticSendfilePlan();
+        }
+        let content_type = cfg.get(self.cache_meta_key(cfg_base, path, "content_type"));
+        let header = (new web_server.HttpResponseFactory()).response_head_extra(200, content_type, size, false, "");
+        return new web_server.StaticSendfilePlan(header, source_handle, size);
     }
 
     // Expands a try_files candidate such as "$uri" or "$uri/" into a concrete
@@ -87,6 +239,47 @@ class StaticFileServer {
         return factory.response_extra(200, content_type, identity_encoded.body, keep_alive, identity_encoded.extra_headers);
     }
 
+    // Pre-renders exact static locations during worker startup. This mirrors the
+    // common Nginx hot path for assets such as /index.html: the file is stat'ed
+    // and read once per worker process, then served from memory until restart.
+    async func preload_exact_static_locations_at(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String) -> Int {
+        let util = new web_server.ServerUtil();
+        let keys = new web_server.ConfigKeys();
+        let cached = 0;
+        let loc_count = util.cfg_int_at(cfg, cfg_base, "loc_count", 0);
+        loop (let loc = 0; loc < loc_count; loc += 1) {
+            let mode = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".mode"), "prefix");
+            let path = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".prefix"), "/");
+            let proxy_pass = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".proxy_pass"), "");
+            let backend_kind = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".backend_kind"), "");
+            if mode == "exact" && len(proxy_pass) == 0 && backend_kind != "fastcgi" {
+                let disk = self.resolve_disk(cfg, cfg_base, loc, path);
+                if len(disk) > 0 {
+                    let is_dir, dir_err = fs.stat_is_dir(disk);
+                    if dir_err != OK || !is_dir {
+                        let body, body_err = await aio.fs.read_text(disk);
+                        if body_err == OK {
+                            self.store_cached_response(cfg, cfg_base, path, disk, util.mime(disk), body);
+                            cached += 1;
+                        }
+                    }
+                }
+            }
+        }
+        return cached;
+    }
+
+    // Preloads the listener default server plus all embedded virtual hosts.
+    async func preload_listener_exact_static_locations(self: web_server.StaticFileServer, cfg: collections.Map<String, String>) -> Int {
+        let util = new web_server.ServerUtil();
+        let cached = await self.preload_exact_static_locations_at(cfg, "");
+        loop (let vi = 0; vi < util.cfg_int(cfg, "vhost_count", 0); vi += 1) {
+            let vhost_cached = await self.preload_exact_static_locations_at(cfg, "vhost." + strconv.itoa(vi));
+            cached += vhost_cached;
+        }
+        return cached;
+    }
+
     // Resolves the disk path without reading it. Request dispatch uses this to
     // preflight static compression and choose the fastest response path.
     func resolve_disk(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, loc: Int, path: String) -> String {
@@ -130,6 +323,10 @@ class StaticFileServer {
         let util = new web_server.ServerUtil();
         let keys = new web_server.ConfigKeys();
         let factory = new web_server.HttpResponseFactory();
+        let cached = await self.cached_or_refreshed_response(cfg, cfg_base, req, path, keep_alive);
+        if len(cached) > 0 {
+            return cached;
+        }
         let try_count = util.cfg_int_at(cfg, cfg_base, keys.loc_key(loc, ".try_count"), 0);
         loop (let i = 0; i < try_count; i += 1) {
             let cand = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".try.") + strconv.itoa(i), "$uri");

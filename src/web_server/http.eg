@@ -54,15 +54,21 @@ class HttpResponse {
 
     // Renders the full HTTP/1.1 response message.
     func render(self: web_server.HttpResponse) -> String {
+        return self.render_head(len(self.body)) + self.body;
+    }
+
+    // Renders only the response headers. Static sendfile uses this so the body
+    // can be transferred by the kernel instead of copied into an Egret string.
+    func render_head(self: web_server.HttpResponse, body_length: Int) -> String {
         return "HTTP/1.1 " + strconv.itoa(self.code) + " " + self.reason()
         + "\r\nServer: egret-web-server\r\nContent-Type: " + self.content_type
-        + "\r\nContent-Length: " + strconv.itoa(len(self.body))
+        + "\r\nContent-Length: " + strconv.itoa(body_length)
         + "\r\nStrict-Transport-Security: max-age=31536000; includeSubDomains"
         + "\r\nContent-Security-Policy: upgrade-insecure-requests; block-all-mixed-content"
         + "\r\nX-Content-Type-Options: nosniff"
         + "\r\nReferrer-Policy: strict-origin-when-cross-origin"
         + self.extra_headers
-        + self.connection_header() + self.body;
+        + self.connection_header();
     }
 }
 
@@ -131,6 +137,7 @@ class HttpRequest {
 norm HttpConn<T> {
     async func http_conn_recv(self: T, max_bytes: Int, timeout_ms: Int) -> String, ErrCode;
     async func http_conn_send(self: T, data: String, timeout_ms: Int) -> Int, ErrCode;
+    async func http_conn_send_slice(self: T, data: String, offset: Int, length: Int, timeout_ms: Int) -> Int, ErrCode;
     func http_conn_close(self: T) -> Void;
 }
 
@@ -152,6 +159,11 @@ norm impl HttpConn<web_server.TcpHttpConn> {
 
     async func http_conn_send(self: web_server.TcpHttpConn, data: String, timeout_ms: Int) -> Int, ErrCode {
         let n, err = await aio.tcp.send(self.fd, data, timeout_ms);
+        return n, err;
+    }
+
+    async func http_conn_send_slice(self: web_server.TcpHttpConn, data: String, offset: Int, length: Int, timeout_ms: Int) -> Int, ErrCode {
+        let n, err = await aio.tcp.send(self.fd, substr(data, offset, length), timeout_ms);
         return n, err;
     }
 
@@ -178,6 +190,11 @@ norm impl HttpConn<web_server.TlsHttpConn> {
 
     async func http_conn_send(self: web_server.TlsHttpConn, data: String, timeout_ms: Int) -> Int, ErrCode {
         let n, err = await aio.tls.send(self.fd, data, timeout_ms);
+        return n, err;
+    }
+
+    async func http_conn_send_slice(self: web_server.TlsHttpConn, data: String, offset: Int, length: Int, timeout_ms: Int) -> Int, ErrCode {
+        let n, err = await aio.tls.send_slice(self.fd, data, offset, length, timeout_ms);
         return n, err;
     }
 
@@ -268,6 +285,11 @@ class HttpResponseFactory {
     func response_extra(self: web_server.HttpResponseFactory, code: Int, content_type: String, body: String, keep_alive: Bool, extra_headers: String) -> String {
         let resp = new web_server.HttpResponse(code, content_type, body, keep_alive, extra_headers);
         return resp.render();
+    }
+
+    func response_head_extra(self: web_server.HttpResponseFactory, code: Int, content_type: String, body_length: Int, keep_alive: Bool, extra_headers: String) -> String {
+        let resp = new web_server.HttpResponse(code, content_type, "", keep_alive, extra_headers);
+        return resp.render_head(body_length);
     }
 
     func redirect_response(self: web_server.HttpResponseFactory, location: String, keep_alive: Bool) -> String {
@@ -603,7 +625,7 @@ class HttpConnStream<T: web_server.HttpConn> {
             if chunk_len > 16384 {
                 chunk_len = 16384;
             }
-            let n, err = await web_server.HttpConn<T>.http_conn_send(self.conn, substr(data, off, chunk_len), timeout_ms);
+            let n, err = await web_server.HttpConn<T>.http_conn_send_slice(self.conn, data, off, chunk_len, timeout_ms);
             if err != OK {
                 return 1;
             }

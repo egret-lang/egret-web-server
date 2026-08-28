@@ -7,6 +7,7 @@ use aio.tcp;
 use aio.fs;
 use aio.tls;
 use collections;
+use fs;
 use os;
 use runtime;
 use strings;
@@ -24,6 +25,24 @@ class ConnectionCloser {
         } else {
             _ = aio.tcp.close(fd);
         }
+    }
+}
+
+// Applies OpenSSL runtime options before TLS listeners are created. The raw
+// constants match OpenSSL's public ssl.h values and keep this package from
+// depending on a separate constants module in the standard library.
+class TlsRuntimeOptimizer {
+    func init(self: web_server.TlsRuntimeOptimizer) -> Void {
+    }
+
+    func configure(self: web_server.TlsRuntimeOptimizer) -> Void {
+        let ssl_sess_cache_server = 2;
+        let ssl_mode_enable_partial_write = 1;
+        let ssl_mode_accept_moving_write_buffer = 2;
+        let ssl_mode_release_buffers = 16;
+        let ssl_op_no_compression = 131072;
+        let mode = ssl_mode_enable_partial_write + ssl_mode_accept_moving_write_buffer + ssl_mode_release_buffers;
+        let _, _ = aio.tls.configure_openssl_ctx(ssl_sess_cache_server, 131072, 300, 1, mode, ssl_op_no_compression, 0);
     }
 }
 
@@ -70,9 +89,45 @@ class ClientConnection {
         return await self.transport.send_all(data);
     }
 
+    // Sends a close-delimited plain HTTP response with kernel sendfile. The
+    // source file handle is owned by this request; the temporary destination
+    // wrapper owns the socket fd and closes it after the transfer.
+    async func sendfile_and_close(self: web_server.ClientConnection, header: String, source_handle: Int, body_size: Int) -> Int {
+        if self.is_tls || self.fd < 0 || source_handle <= 0 || body_size < 0 {
+            if source_handle > 0 {
+                _ = fs.close(source_handle);
+            }
+            return await self.send(header);
+        }
+        let header_n = await self.send(header);
+        let out_file, out_err = fs.file_from_fd(self.fd, "", fs.flag_write());
+        if out_err != OK {
+            _ = fs.close(source_handle);
+            return header_n;
+        }
+        let input_file = fs.file_from_handle(source_handle);
+        let sent = 0;
+        loop sent < body_size {
+            let n, send_err = fs.sendfile_at(out_file, input_file, sent, body_size - sent);
+            if send_err != OK || n <= 0 {
+                break;
+            }
+            sent += n;
+        }
+        _ = fs.close(source_handle);
+        _ = out_file.close();
+        self.fd = -1;
+        self.transport.fd = -1;
+        return header_n + sent;
+    }
+
     // Closes the connection.
     func close(self: web_server.ClientConnection) -> Void {
-        _ = self.transport.close();
+        if self.fd >= 0 {
+            _ = self.transport.close();
+            self.fd = -1;
+            self.transport.fd = -1;
+        }
     }
 }
 
@@ -832,9 +887,18 @@ norm impl RequestHandler<web_server.FastcgiRequestHandler> {
 class RequestDispatcher {
     // Per-request keep-alive decision used by generated responses.
     var keep_alive: Bool;
+    // Config base selected for the most recent request. The logger reuses this
+    // value to avoid parsing Host and scanning virtual hosts a second time.
+    var cfg_base: String;
+    // Source file selected for the sendfile fast path.
+    var sendfile_source_handle: Int;
+    var sendfile_body_size: Int;
 
     func init(self: web_server.RequestDispatcher) -> Void {
         self.keep_alive = false;
+        self.cfg_base = "";
+        self.sendfile_source_handle = 0;
+        self.sendfile_body_size = 0;
     }
 
     func deinit(self: web_server.RequestDispatcher) -> Void {
@@ -846,11 +910,15 @@ class RequestDispatcher {
         let keys = new web_server.ConfigKeys();
         let router = new web_server.VirtualHostRouter(listener);
         self.keep_alive = false;
+        self.cfg_base = "";
+        self.sendfile_source_handle = 0;
+        self.sendfile_body_size = 0;
         if !conn.is_tls && router.should_redirect_https(req) {
             let ctx = new web_server.RequestContext(0, req, req.path(), false, conn);
             return await web_server.RequestHandler<web_server.RedirectRequestHandler>.handle_request(new web_server.RedirectRequestHandler(router.redirect_url(req)), listener, "", ctx);
         }
         let cfg_base = router.select_base(req, conn.sni);
+        self.cfg_base = cfg_base;
         self.keep_alive = req.keep_alive();
         if !allow_keep_alive {
             self.keep_alive = false;
@@ -877,6 +945,15 @@ class RequestDispatcher {
             ctx.keep_alive = false;
             resp = await web_server.RequestHandler<web_server.FastcgiRequestHandler>.handle_request(new web_server.FastcgiRequestHandler(fastcgi_pass), listener, cfg_base, ctx);
         } else {
+            if !conn.is_tls {
+                let static_server = new web_server.StaticFileServer();
+                let sendfile_plan = static_server.cached_sendfile_response(listener, cfg_base, req, path, self.keep_alive);
+                if sendfile_plan.source_handle > 0 {
+                    self.sendfile_source_handle = sendfile_plan.source_handle;
+                    self.sendfile_body_size = sendfile_plan.body_size;
+                    return sendfile_plan.header;
+                }
+            }
             resp = await web_server.RequestHandler<web_server.StaticRequestHandler>.handle_request(new web_server.StaticRequestHandler(), listener, cfg_base, ctx);
         }
         return resp;
@@ -1026,12 +1103,14 @@ class ClientRequestTask {
 
     // Handles a client connection, including repeated requests on keep-alive.
     // Every valid request goes through RequestDispatcher.
-    async func handle(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, is_tls: Bool, cfd: Int, logger: web_server.WebLogger) -> Int {
+    async func handle(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, is_tls: Bool, cfd: Int) -> Int {
         let util = new web_server.ServerUtil();
         let max_body = util.cfg_int(listener, "client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE);
         let timeout_ms = util.cfg_int(listener, "keepalive_timeout_ms", DEFAULT_KEEPALIVE_TIMEOUT_MS);
         let conn = new web_server.ClientConnection(cfd, is_tls, timeout_ms);
         let factory = new web_server.HttpResponseFactory();
+        let dispatcher = new web_server.RequestDispatcher();
+        let logger = new web_server.WebLogger();
         let keepalive_limit = DEFAULT_KEEPALIVE_REQUEST_LIMIT;
         let handled = 0;
         let open = true;
@@ -1051,17 +1130,21 @@ class ClientRequestTask {
                 open = false;
             } else {
                 let request = new web_server.HttpRequest(req);
-                let dispatcher = new web_server.RequestDispatcher();
                 let response = await dispatcher.dispatch(listener, conn, request, handled + 1 < keepalive_limit);
-                _ = await conn.send(response);
-                logger.write_access(listener, conn, request, response);
+                if dispatcher.sendfile_source_handle > 0 {
+                    _ = await conn.sendfile_and_close(response, dispatcher.sendfile_source_handle, dispatcher.sendfile_body_size);
+                } else {
+                    _ = await conn.send(response);
+                }
+                logger.write_access_meta_at(listener, dispatcher.cfg_base, conn, request, response, logger.response_status(response), logger.response_body_bytes(response));
                 handled += 1;
-                if !dispatcher.keep_alive {
+                if dispatcher.sendfile_source_handle > 0 || !dispatcher.keep_alive {
                     open = false;
                 }
             }
         }
         _ = conn.close();
+        logger.close();
         return handled;
     }
 }
@@ -1089,6 +1172,7 @@ class ServerListener {
     func listen_conn(self: web_server.ServerListener) -> Int, ErrCode {
         let util = new web_server.ServerUtil();
         if self.is_tls {
+            (new web_server.TlsRuntimeOptimizer()).configure();
             let lfd, lfd_err = aio.tls.listen(
             util.cfg_get(self.listener, "listen_host", DEFAULT_LISTEN_HOST),
             util.cfg_int(self.listener, "listen_port", DEFAULT_LISTEN_PORT),
@@ -1175,54 +1259,70 @@ class ServerListener {
         return tcp_client_fd, tcp_accept_err;
     }
 
-    // Handles one accepted client through RequestDispatcher.
-    async func handle(self: web_server.ServerListener, cfd: Int, logger: web_server.WebLogger) -> Int {
-        let util = new web_server.ServerUtil();
-        let max_body = util.cfg_int(self.listener, "client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE);
-        let timeout_ms = util.cfg_int(self.listener, "keepalive_timeout_ms", DEFAULT_KEEPALIVE_TIMEOUT_MS);
-        let conn = new web_server.ClientConnection(cfd, self.is_tls, timeout_ms);
-        let factory = new web_server.HttpResponseFactory();
-        let keepalive_limit = DEFAULT_KEEPALIVE_REQUEST_LIMIT;
-        let handled = 0;
-        let open = true;
-        loop open {
-            let req = await conn.recv_request(max_body);
-            if len(req) == 0 {
-                open = false;
-            } else if strings.find_substr(req, "\r\n\r\n") < 0 {
-                let bad_response = factory.response_conn(400, "text/plain", "Bad Request", false);
-                _ = await conn.send(bad_response);
-                logger.write_error(self.listener, "info", "client sent an invalid HTTP request");
-                open = false;
-            } else if len(req) >= max_body {
-                let large_response = factory.response_conn(413, "text/plain", "Payload Too Large", false);
-                _ = await conn.send(large_response);
-                logger.write_error(self.listener, "warn", "client request body is larger than client_max_body_size");
-                open = false;
-            } else {
-                let request = new web_server.HttpRequest(req);
-                let dispatcher = new web_server.RequestDispatcher();
-                let resp = await dispatcher.dispatch(self.listener, conn, request, handled + 1 < keepalive_limit);
-                _ = await conn.send(resp);
-                logger.write_access(self.listener, conn, request, resp);
-                handled += 1;
-                if !dispatcher.keep_alive {
-                    open = false;
+    // Reaps completed client tasks without blocking on active connections.
+    // Completed entries are removed by swapping in the last pending future so
+    // the vector stays compact without preserving request ordering.
+    async func join_ready_client_tasks(self: web_server.ServerListener, tasks: collections.Vector<Future(Int)>) -> Int {
+        let total = 0;
+        let i = 0;
+        loop i < tasks.len() {
+            let current = tasks.get_unchecked(i);
+            if runtime.future_is_ready_int(current) {
+                let handled = join current;
+                total += handled;
+                let last = tasks.len() - 1;
+                if i < last {
+                    _ = tasks.set(i, tasks.get_unchecked(last));
                 }
+                _ = tasks.pop_back(current);
+            } else {
+                i += 1;
             }
         }
-        _ = conn.close();
-        return handled;
+        return total;
     }
 
-    // Accept loop for one worker. Connections are handled inline to avoid
-    // keeping short-lived client futures in a generic runtime container across
-    // TLS close/reload races.
-    async func worker_loop(self: web_server.ServerListener, max_requests: Int, logger: web_server.WebLogger) -> Int {
+    // Frees at least one capacity slot when the listener has reached
+    // worker_connections. The loop polls all client futures and uses a short
+    // async file-watch timeout as a scheduler tick, so it resumes when any
+    // connection finishes instead of blocking on a specific pending future.
+    async func wait_for_client_capacity(self: web_server.ServerListener, tasks: collections.Vector<Future(Int)>) -> Int {
+        let total = 0;
+        loop total == 0 && tasks.len() > 0 {
+            let ready_handled = await self.join_ready_client_tasks(tasks);
+            total += ready_handled;
+            if total == 0 && tasks.len() > 0 {
+                let _, _ = await aio.fs.watch_once(".", 1);
+            }
+        }
+        return total;
+    }
+
+    // Joins every remaining client task during listener shutdown.
+    async func join_all_client_tasks(self: web_server.ServerListener, tasks: collections.Vector<Future(Int)>) -> Int {
+        let total = 0;
+        loop (let i = 0; i < tasks.len(); i += 1) {
+            let handled = join tasks.get_unchecked(i);
+            total += handled;
+        }
+        tasks.clear();
+        return total;
+    }
+
+    // Accept loop for one worker. Each accepted connection is handled by its
+    // own async task so slow clients, keep-alive sessions, proxy upstreams, and
+    // FastCGI calls do not block the listener from accepting more clients.
+    async func worker_loop(self: web_server.ServerListener, max_requests: Int) -> Int {
         let util = new web_server.ServerUtil();
         let accepted = 0;
+        let handled = 0;
         let serving = true;
         let accept_timeout_ms = DEFAULT_ACCEPT_TIMEOUT_MS;
+        let max_concurrent_connections = util.cfg_int(self.listener, "worker_connections", DEFAULT_WORKER_CONNECTIONS);
+        if max_concurrent_connections < 1 {
+            max_concurrent_connections = 1;
+        }
+        let client_tasks = new collections.Vector<Future(Int)>();
         if self.is_tls {
             accept_timeout_ms = util.cfg_int(self.listener, "ssl_handshake_timeout_ms", DEFAULT_KEEPALIVE_TIMEOUT_MS);
             if accept_timeout_ms < DEFAULT_ACCEPT_TIMEOUT_MS {
@@ -1230,15 +1330,25 @@ class ServerListener {
             }
         }
         loop serving {
+            let ready_handled = await self.join_ready_client_tasks(client_tasks);
+            handled += ready_handled;
+            loop client_tasks.len() >= max_concurrent_connections {
+                let capacity_handled = await self.wait_for_client_capacity(client_tasks);
+                handled += capacity_handled;
+            }
             let cfd, _ = await self.accept(accept_timeout_ms);
             if cfd > 0 {
-                _ = await (new web_server.ClientRequestTask()).handle(self.listener, self.is_tls, cfd, logger);
+                let client_listener = (new web_server.MapCloner()).clone(self.listener);
+                _ = client_tasks.push(spawn (new web_server.ClientRequestTask()).handle(client_listener, self.is_tls, cfd));
                 accepted += 1;
             }
             if max_requests > 0 && accepted >= max_requests {
                 serving = false;
             }
         }
+        let final_batch_handled = await self.join_all_client_tasks(client_tasks);
+        handled += final_batch_handled;
+        _ = handled;
         return 0;
     }
 
@@ -1252,9 +1362,11 @@ class ServerListener {
             return 10;
         }
         self.is_tls = util.cfg_get(self.listener, "__is_tls", "0") == "1";
-        let logger = new web_server.WebLogger();
-        let rc = await self.worker_loop(max_requests, logger);
-        logger.close();
+        _ = await (new web_server.StaticFileServer()).preload_listener_exact_static_locations(self.listener);
+        let rc = await self.worker_loop(max_requests);
+        if self.is_tls {
+            print("egret-web-server: tls_session_stats " + aio.tls.session_stats(self.listen_fd));
+        }
         return rc;
     }
 }
