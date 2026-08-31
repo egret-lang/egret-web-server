@@ -15,11 +15,13 @@ class StaticSendfilePlan {
     var header: String;
     var source_handle: Int;
     var body_size: Int;
+    var disk: String;
 
-    func init(self: web_server.StaticSendfilePlan, header: String = "", source_handle: Int = 0, body_size: Int = 0) -> Void {
+    func init(self: web_server.StaticSendfilePlan, header: String = "", source_handle: Int = 0, body_size: Int = 0, disk: String = "") -> Void {
         self.header = header;
         self.source_handle = source_handle;
         self.body_size = body_size;
+        self.disk = disk;
     }
 
     func deinit(self: web_server.StaticSendfilePlan) -> Void {
@@ -99,17 +101,13 @@ class StaticFileServer {
         return "";
     }
 
-    // Stores both connection-mode variants so the request path only performs a
-    // single map lookup before writing the already-rendered response bytes.
-    func store_cached_response(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, path: String, disk: String, content_type: String, body: String) -> Void {
-        let factory = new web_server.HttpResponseFactory();
+    // Stores file metadata without caching the body. Large exact static files
+    // still need this metadata for the sendfile/read-send fast path, but putting
+    // their full body into the config map would multiply memory by workers.
+    func store_cached_file_meta(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, path: String, disk: String, content_type: String, size: Int) -> Void {
         let util = new web_server.ServerUtil();
         let token, stat_err = self.stat_token(disk);
         if stat_err != OK {
-            return;
-        }
-        let size, size_err = fs.stat_size(disk);
-        if size_err != OK {
             return;
         }
         _ = cfg.set(self.cache_meta_key(cfg_base, path, "disk"), disk);
@@ -117,6 +115,17 @@ class StaticFileServer {
         _ = cfg.set(self.cache_meta_key(cfg_base, path, "size"), util.itoa(size));
         _ = cfg.set(self.cache_meta_key(cfg_base, path, "stat_token"), token);
         _ = cfg.set(self.cache_meta_key(cfg_base, path, "checked_second"), util.itoa(time.unix_sec()));
+    }
+
+    // Stores both connection-mode variants so the request path only performs a
+    // single map lookup before writing the already-rendered response bytes.
+    func store_cached_response(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, path: String, disk: String, content_type: String, body: String) -> Void {
+        let factory = new web_server.HttpResponseFactory();
+        let size, size_err = fs.stat_size(disk);
+        if size_err != OK {
+            return;
+        }
+        self.store_cached_file_meta(cfg, cfg_base, path, disk, content_type, size);
         _ = cfg.set(self.response_cache_key(cfg_base, path, true), factory.response_extra(200, content_type, body, true, ""));
         _ = cfg.set(self.response_cache_key(cfg_base, path, false), factory.response_extra(200, content_type, body, false, ""));
     }
@@ -148,7 +157,7 @@ class StaticFileServer {
     // Builds the HTTP header plus a per-request source file handle for a kernel
     // sendfile response. The caller must close the returned source handle.
     func cached_sendfile_response(self: web_server.StaticFileServer, cfg: collections.Map<String, String>, cfg_base: String, req: web_server.HttpRequest, path: String, keep_alive: Bool) -> web_server.StaticSendfilePlan {
-        if keep_alive || req.accepts_gzip() || req.method() != "GET" {
+        if req.accepts_gzip() || req.method() != "GET" {
             return new web_server.StaticSendfilePlan();
         }
         if !self.cached_file_is_fresh(cfg, cfg_base, path) {
@@ -165,8 +174,12 @@ class StaticFileServer {
             return new web_server.StaticSendfilePlan();
         }
         let content_type = cfg.get(self.cache_meta_key(cfg_base, path, "content_type"));
-        let header = (new web_server.HttpResponseFactory()).response_head_extra(200, content_type, size, false, "");
-        return new web_server.StaticSendfilePlan(header, source_handle, size);
+        let response_keep_alive = keep_alive;
+        if size > SENDFILE_STREAM_THRESHOLD_BYTES {
+            response_keep_alive = false;
+        }
+        let header = (new web_server.HttpResponseFactory()).response_head_extra(200, content_type, size, response_keep_alive, "");
+        return new web_server.StaticSendfilePlan(header, source_handle, size, disk);
     }
 
     // Expands a try_files candidate such as "$uri" or "$uri/" into a concrete
@@ -252,19 +265,31 @@ class StaticFileServer {
             let path = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".prefix"), "/");
             let proxy_pass = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".proxy_pass"), "");
             let backend_kind = util.cfg_get_at(cfg, cfg_base, keys.loc_key(loc, ".backend_kind"), "");
-            if mode == "exact" && len(proxy_pass) == 0 && backend_kind != "fastcgi" {
-                let disk = self.resolve_disk(cfg, cfg_base, loc, path);
-                if len(disk) > 0 {
-                    let is_dir, dir_err = fs.stat_is_dir(disk);
-                    if dir_err != OK || !is_dir {
-                        let body, body_err = await aio.fs.read_text(disk);
-                        if body_err == OK {
-                            self.store_cached_response(cfg, cfg_base, path, disk, util.mime(disk), body);
-                            cached += 1;
-                        }
-                    }
-                }
+            if mode != "exact" || len(proxy_pass) > 0 || backend_kind == "fastcgi" {
+                skip;
             }
+            let disk = self.resolve_disk(cfg, cfg_base, loc, path);
+            if len(disk) == 0 {
+                skip;
+            }
+            let is_dir, dir_err = fs.stat_is_dir(disk);
+            if dir_err == OK && is_dir {
+                skip;
+            }
+            let size, size_err = fs.stat_size(disk);
+            if size_err != OK {
+                skip;
+            }
+            if size > STATIC_BODY_CACHE_MAX_BYTES {
+                self.store_cached_file_meta(cfg, cfg_base, path, disk, util.mime(disk), size);
+                skip;
+            }
+            let body, body_err = await aio.fs.read_text(disk);
+            if body_err != OK {
+                skip;
+            }
+            self.store_cached_response(cfg, cfg_base, path, disk, util.mime(disk), body);
+            cached += 1;
         }
         return cached;
     }

@@ -279,6 +279,10 @@ class ConfigDsl {
         _ = cfg.set("access_log_format", self.util.cfg_get(cfg, "http_access_log_format", self.util.cfg_get(cfg, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT)));
         _ = cfg.set("error_log", self.util.cfg_get(cfg, "http_error_log", self.util.cfg_get(cfg, "error_log", DEFAULT_ERROR_LOG)));
         _ = cfg.set("error_log_level", self.util.cfg_get(cfg, "http_error_log_level", self.util.cfg_get(cfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL)));
+        _ = cfg.set("limit_req_key", self.util.cfg_get(cfg, "http_limit_req_key", DEFAULT_LIMIT_REQ_KEY));
+        _ = cfg.set("limit_req_count", self.util.cfg_get(cfg, "http_limit_req_count", DEFAULT_LIMIT_REQ_COUNT_TEXT));
+        _ = cfg.set("limit_req_window_ms", self.util.cfg_get(cfg, "http_limit_req_window_ms", DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT));
+        _ = cfg.set("limit_req_rate", self.util.cfg_get(cfg, "http_limit_req_rate", DEFAULT_LIMIT_REQ_RATE));
         _ = cfg.set("loc_count", "0");
         _ = cfg.set("rewrite_count", "0");
     }
@@ -447,6 +451,41 @@ class ConfigDsl {
         return self.cursor.consume(ts, i);
     }
 
+    // Parses "limit_req $remote_addr 2/s". The directive has fixed arity, so
+    // it also tolerates a missing semicolon before the next directive.
+    func parse_limit_req_stmt(self: web_server.ConfigDsl, ts: collections.Vector<String>, i: Int, cfg: collections.Map<String, String>) -> Int {
+        if i + 2 >= ts.len() {
+            return self.cursor.skip_stmt(ts, i);
+        }
+        let key = ts.get(i + 1);
+        let rate = strings.to_lower_ascii(ts.get(i + 2));
+        let sep = strings.last_index(rate, "/");
+        let count = 0;
+        let window_ms = 0;
+        if sep > 0 && sep + 1 < len(rate) {
+            count = self.util.atoi_or(substr(rate, 0, sep), 0);
+            let unit = substr(rate, sep + 1, len(rate) - (sep + 1));
+            if unit == "s" {
+                window_ms = 1000;
+            } else if unit == "m" {
+                window_ms = 60000;
+            } else if unit == "h" {
+                window_ms = 3600000;
+            }
+        }
+        if key == "$remote_addr" && count > 0 && window_ms > 0 {
+            _ = cfg.set("limit_req_key", key);
+            _ = cfg.set("limit_req_count", strconv.itoa(count));
+            _ = cfg.set("limit_req_window_ms", strconv.itoa(window_ms));
+            _ = cfg.set("limit_req_rate", rate);
+        }
+        i += 3;
+        if i < ts.len() && ts.get(i) == ";" {
+            return i + 1;
+        }
+        return i;
+    }
+
     // Ensures each server has a fallback prefix "/" location.
     func ensure_default_location(self: web_server.ConfigDsl, cfg: collections.Map<String, String>) -> Void {
         if self.util.cfg_int(cfg, "loc_count", 0) != 0 {
@@ -490,6 +529,10 @@ class ConfigDsl {
         _ = cfg.set(self.keys.server_key(server_idx, ".access_log_format"), self.util.cfg_get(cfg, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT));
         _ = cfg.set(self.keys.server_key(server_idx, ".error_log"), self.util.cfg_get(cfg, "error_log", DEFAULT_ERROR_LOG));
         _ = cfg.set(self.keys.server_key(server_idx, ".error_log_level"), self.util.cfg_get(cfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
+        _ = cfg.set(self.keys.server_key(server_idx, ".limit_req_key"), self.util.cfg_get(cfg, "limit_req_key", DEFAULT_LIMIT_REQ_KEY));
+        _ = cfg.set(self.keys.server_key(server_idx, ".limit_req_count"), self.util.cfg_get(cfg, "limit_req_count", DEFAULT_LIMIT_REQ_COUNT_TEXT));
+        _ = cfg.set(self.keys.server_key(server_idx, ".limit_req_window_ms"), self.util.cfg_get(cfg, "limit_req_window_ms", DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT));
+        _ = cfg.set(self.keys.server_key(server_idx, ".limit_req_rate"), self.util.cfg_get(cfg, "limit_req_rate", DEFAULT_LIMIT_REQ_RATE));
         let listen_count = self.util.cfg_int(cfg, "listen_count", 0);
         _ = cfg.set(self.keys.server_key(server_idx, ".listen_count"), strconv.itoa(listen_count));
         loop (let li = 0; li < listen_count; li += 1) {
@@ -561,6 +604,10 @@ class ConfigDsl {
         _ = out.set("access_log_format", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".access_log_format"), DEFAULT_ACCESS_LOG_FORMAT));
         _ = out.set("error_log", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".error_log"), DEFAULT_ERROR_LOG));
         _ = out.set("error_log_level", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".error_log_level"), DEFAULT_ERROR_LOG_LEVEL));
+        _ = out.set("limit_req_key", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".limit_req_key"), DEFAULT_LIMIT_REQ_KEY));
+        _ = out.set("limit_req_count", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".limit_req_count"), DEFAULT_LIMIT_REQ_COUNT_TEXT));
+        _ = out.set("limit_req_window_ms", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".limit_req_window_ms"), DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT));
+        _ = out.set("limit_req_rate", self.util.cfg_get(cfg, self.keys.server_key(server_idx, ".limit_req_rate"), DEFAULT_LIMIT_REQ_RATE));
         let log_format_count = self.util.cfg_int(cfg, "log_format_count", 0);
         _ = out.set("log_format_count", strconv.itoa(log_format_count));
         loop (let lfi = 0; lfi < log_format_count; lfi += 1) {
@@ -956,6 +1003,9 @@ class ConfigDsl {
                 "error_log" => {
                     i = self.parse_error_log_stmt(ts, i, cfg);
                 },
+                "limit_req" => {
+                    i = self.parse_limit_req_stmt(ts, i, cfg);
+                },
                 "location" => {
                     i = self.parse_location(ts, i, cfg, loc_count);
                     loc_count += 1;
@@ -1067,6 +1117,13 @@ class ConfigDsl {
                     _ = cfg.set("http_error_log", self.util.cfg_get(cfg, "error_log", DEFAULT_ERROR_LOG));
                     _ = cfg.set("http_error_log_level", self.util.cfg_get(cfg, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
                 },
+                "limit_req" => {
+                    i = self.parse_limit_req_stmt(ts, i, cfg);
+                    _ = cfg.set("http_limit_req_key", self.util.cfg_get(cfg, "limit_req_key", DEFAULT_LIMIT_REQ_KEY));
+                    _ = cfg.set("http_limit_req_count", self.util.cfg_get(cfg, "limit_req_count", DEFAULT_LIMIT_REQ_COUNT_TEXT));
+                    _ = cfg.set("http_limit_req_window_ms", self.util.cfg_get(cfg, "limit_req_window_ms", DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT));
+                    _ = cfg.set("http_limit_req_rate", self.util.cfg_get(cfg, "limit_req_rate", DEFAULT_LIMIT_REQ_RATE));
+                },
                 _ => {
                     i = self.cursor.skip_stmt(ts, i);
                 }
@@ -1109,6 +1166,14 @@ class ConfigDsl {
         _ = cfg.set("http_access_log_format", DEFAULT_ACCESS_LOG_FORMAT);
         _ = cfg.set("http_error_log", DEFAULT_ERROR_LOG);
         _ = cfg.set("http_error_log_level", DEFAULT_ERROR_LOG_LEVEL);
+        _ = cfg.set("limit_req_key", DEFAULT_LIMIT_REQ_KEY);
+        _ = cfg.set("limit_req_count", DEFAULT_LIMIT_REQ_COUNT_TEXT);
+        _ = cfg.set("limit_req_window_ms", DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT);
+        _ = cfg.set("limit_req_rate", DEFAULT_LIMIT_REQ_RATE);
+        _ = cfg.set("http_limit_req_key", DEFAULT_LIMIT_REQ_KEY);
+        _ = cfg.set("http_limit_req_count", DEFAULT_LIMIT_REQ_COUNT_TEXT);
+        _ = cfg.set("http_limit_req_window_ms", DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT);
+        _ = cfg.set("http_limit_req_rate", DEFAULT_LIMIT_REQ_RATE);
         _ = cfg.set("loc_count", "0");
         _ = cfg.set("rewrite_count", "0");
         _ = cfg.set("server_total", "0");

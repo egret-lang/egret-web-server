@@ -475,10 +475,16 @@ class GzipRequestCapabilities {
 
     // Returns true only when the request explicitly advertises gzip support.
     func accepts_gzip(self: web_server.GzipRequestCapabilities, req: String) -> Bool {
-        let lc = strings.to_lower_ascii(req);
-        if strings.contains(lc, "\r\naccept-encoding:") {
-            return strings.contains(lc, "gzip");
+        let header_start = strings.find_substr_ascii_case(req, "\r\naccept-encoding:");
+        if header_start < 0 {
+            return false;
         }
-        return false;
+        let value_start = header_start + len("\r\naccept-encoding:");
+        let value_tail = substr(req, value_start, len(req) - value_start);
+        let value_end = strings.find_substr(value_tail, "\r\n");
+        if value_end < 0 {
+            return strings.find_substr_ascii_case(value_tail, "gzip") >= 0;
+        }
+        return strings.find_substr_ascii_case(substr(value_tail, 0, value_end), "gzip") >= 0;
     }
 }

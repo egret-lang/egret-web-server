@@ -37,6 +37,7 @@ class HttpResponse {
             301 => "Moved Permanently",
             400 => "Bad Request",
             404 => "Not Found",
+            429 => "Too Many Requests",
             413 => "Payload Too Large",
             500 => "Internal Server Error",
             502 => "Bad Gateway",

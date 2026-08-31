@@ -4,6 +4,7 @@
 module web_server;
 
 use aio.tcp;
+use aio;
 use aio.fs;
 use aio.tls;
 use collections;
@@ -12,6 +13,7 @@ use os;
 use runtime;
 use strings;
 use std;
+use time;
 
 // Transport-aware connection closer used by ClientConnection.
 class ConnectionCloser {
@@ -60,12 +62,23 @@ class ClientConnection {
     var remote_addr: String;
     // HTTP transport wrapper for this fd.
     var transport: web_server.HttpTransport;
+    // Diagnostics for the most recent static file body transfer.
+    var file_send_stage: String;
+    var file_send_error: String;
+    var file_send_bytes: Int;
+    var file_send_expected: Int;
+    var worker_load_hint: Int;
 
     func init(self: web_server.ClientConnection, fd: Int, is_tls: Bool, timeout_ms: Int) -> Void {
         self.fd = fd;
         self.is_tls = is_tls;
         self.timeout_ms = timeout_ms;
         self.transport = new web_server.HttpTransport(fd, is_tls, timeout_ms);
+        self.file_send_stage = "";
+        self.file_send_error = "";
+        self.file_send_bytes = 0;
+        self.file_send_expected = 0;
+        self.worker_load_hint = 0;
         self.sni = "";
         self.remote_addr = "";
         if is_tls {
@@ -89,36 +102,92 @@ class ClientConnection {
         return await self.transport.send_all(data);
     }
 
-    // Sends a close-delimited plain HTTP response with kernel sendfile. The
-    // source file handle is owned by this request; the temporary destination
-    // wrapper owns the socket fd and closes it after the transfer.
-    async func sendfile_and_close(self: web_server.ClientConnection, header: String, source_handle: Int, body_size: Int) -> Int {
+    // Sends a plain HTTP response with AIO-backed kernel sendfile. The source
+    // file handle is owned by this request; the socket fd stays owned by
+    // ClientConnection unless the response is close-delimited.
+    async func sendfile_response(self: web_server.ClientConnection, header: String, source_handle: Int, body_size: Int, source_path: String, close_after: Bool) -> Int {
+        self.file_send_stage = "init";
+        self.file_send_error = "";
+        self.file_send_bytes = 0;
+        self.file_send_expected = body_size;
         if self.is_tls || self.fd < 0 || source_handle <= 0 || body_size < 0 {
             if source_handle > 0 {
                 _ = fs.close(source_handle);
             }
-            return await self.send(header);
+            _ = await self.send(header);
+            self.file_send_stage = "header-only";
+            return 0;
         }
-        let header_n = await self.send(header);
-        let out_file, out_err = fs.file_from_fd(self.fd, "", fs.flag_write());
-        if out_err != OK {
+        let header_rc = await self.send(header);
+        if header_rc != 0 {
             _ = fs.close(source_handle);
-            return header_n;
+            _ = self.close();
+            self.file_send_stage = "header";
+            self.file_send_error = "send-failed";
+            return 0;
         }
-        let input_file = fs.file_from_handle(source_handle);
+        if body_size > SENDFILE_STREAM_THRESHOLD_BYTES && len(source_path) > 0 {
+            _ = fs.close(source_handle);
+            return await self.stream_file_response(source_path, body_size, close_after);
+        }
+        if body_size >= SENDFILE_ADAPTIVE_MIN_BYTES && len(source_path) > 0 {
+            let active_sendfiles = aio.tcp.sendfile_active();
+            if active_sendfiles >= SENDFILE_MAX_ACTIVE_LARGE || self.worker_load_hint >= SENDFILE_HIGH_LOAD_CONNECTIONS {
+                _ = fs.close(source_handle);
+                return await self.stream_file_response(source_path, body_size, close_after);
+            }
+        }
+        let sendfile_timeout_ms = self.timeout_ms;
+        if sendfile_timeout_ms < SENDFILE_STREAM_TIMEOUT_MS {
+            sendfile_timeout_ms = SENDFILE_STREAM_TIMEOUT_MS;
+        }
         let sent = 0;
         loop sent < body_size {
-            let n, send_err = fs.sendfile_at(out_file, input_file, sent, body_size - sent);
+            let n, send_err = await aio.tcp.sendfile_fd_at(self.fd, source_handle, sent, body_size - sent, sendfile_timeout_ms);
+            if n > 0 {
+                sent += n;
+                self.file_send_bytes = sent;
+            }
             if send_err != OK || n <= 0 {
+                self.file_send_stage = "sendfile";
+                self.file_send_error = "err=" + (new web_server.ServerUtil()).itoa(send_err) + " n=" + (new web_server.ServerUtil()).itoa(n);
                 break;
             }
-            sent += n;
         }
         _ = fs.close(source_handle);
-        _ = out_file.close();
-        self.fd = -1;
-        self.transport.fd = -1;
-        return header_n + sent;
+        if sent >= body_size {
+            self.file_send_stage = "done";
+        }
+        if close_after || sent < body_size {
+            _ = self.close();
+        }
+        return sent;
+    }
+
+    // Streams very large static files through AIO read + TCP send. This avoids
+    // long macOS sendfile waits that can park a worker in uninterruptible sleep
+    // under high-concurrency large-file pressure.
+    async func stream_file_response(self: web_server.ClientConnection, source_path: String, body_size: Int, close_after: Bool) -> Int {
+        let stream_timeout_ms = self.timeout_ms;
+        if stream_timeout_ms < SENDFILE_STREAM_TIMEOUT_MS {
+            stream_timeout_ms = SENDFILE_STREAM_TIMEOUT_MS;
+        }
+        self.file_send_stage = "stream";
+        self.file_send_error = "";
+        self.file_send_bytes = 0;
+        self.file_send_expected = body_size;
+        let sent, send_err = await aio.tcp.send_path_at(self.fd, source_path, 0, body_size, SENDFILE_STREAM_CHUNK_BYTES, stream_timeout_ms);
+        self.file_send_bytes = sent;
+        if sent >= body_size {
+            self.file_send_stage = "done";
+        } else {
+            self.file_send_stage = "stream-send-path";
+            self.file_send_error = "err=" + (new web_server.ServerUtil()).itoa(send_err) + " n=" + (new web_server.ServerUtil()).itoa(sent);
+        }
+        if close_after || sent < body_size {
+            _ = self.close();
+        }
+        return sent;
     }
 
     // Closes the connection.
@@ -128,6 +197,97 @@ class ClientConnection {
             self.fd = -1;
             self.transport.fd = -1;
         }
+    }
+}
+
+// Worker-local fixed-window request limiter. Each worker process keeps its own
+// counters because listener state is process-local after fork.
+class RequestRateLimiter {
+    var window_by_key: collections.Map<String, Int>;
+    var count_by_key: collections.Map<String, Int>;
+    var last_prune_window: Int;
+
+    func init(self: web_server.RequestRateLimiter) -> Void {
+        self.window_by_key = new collections.Map<String, Int>(1024);
+        self.count_by_key = new collections.Map<String, Int>(1024);
+        self.last_prune_window = -1;
+    }
+
+    func deinit(self: web_server.RequestRateLimiter) -> Void {
+    }
+
+    func limited_key(self: web_server.RequestRateLimiter, rule_key: String, conn: web_server.ClientConnection) -> String {
+        if rule_key == "$remote_addr" {
+            return conn.remote_addr;
+        }
+        return "";
+    }
+
+    func prune_old_windows(self: web_server.RequestRateLimiter, now_window: Int) -> Void {
+        if self.last_prune_window == now_window {
+            return;
+        }
+        if self.count_by_key.len() < 8192 {
+            self.last_prune_window = now_window;
+            return;
+        }
+        let keys = self.window_by_key.keys();
+        loop (let i = 0; i < keys.len(); i += 1) {
+            let key = keys.get_unchecked(i);
+            if self.window_by_key.get_or(key, now_window) != now_window {
+                _ = self.window_by_key.del(key);
+                _ = self.count_by_key.del(key);
+            }
+        }
+        self.last_prune_window = now_window;
+    }
+
+    func namespace_at(self: web_server.RequestRateLimiter, cfg: collections.Map<String, String>, cfg_base: String) -> String {
+        let util = new web_server.ServerUtil();
+        let server_name = util.cfg_get_at(cfg, cfg_base, "server_name", DEFAULT_SERVER_NAME);
+        return cfg_base + "|" + server_name;
+    }
+
+    func allow_at(self: web_server.RequestRateLimiter, cfg: collections.Map<String, String>, cfg_base: String, conn: web_server.ClientConnection) -> Bool {
+        let util = new web_server.ServerUtil();
+        let limit = util.cfg_int_at(cfg, cfg_base, "limit_req_count", 0);
+        if limit <= 0 {
+            return true;
+        }
+        let window_ms = util.cfg_int_at(cfg, cfg_base, "limit_req_window_ms", 0);
+        if window_ms <= 0 {
+            return true;
+        }
+        let rule_key = util.cfg_get_at(cfg, cfg_base, "limit_req_key", "");
+        let value_key = self.limited_key(rule_key, conn);
+        if len(value_key) == 0 {
+            return true;
+        }
+        let now_window = time.now_ms() / window_ms;
+        let key = self.namespace_at(cfg, cfg_base) + "|" + rule_key + "|" + value_key;
+        let previous_window = self.window_by_key.get_or(key, -1);
+        if previous_window != now_window {
+            _ = self.window_by_key.set(key, now_window);
+            _ = self.count_by_key.set(key, 1);
+            _ = self.prune_old_windows(now_window);
+            return true;
+        }
+        let count = self.count_by_key.get_or(key, 0) + 1;
+        _ = self.count_by_key.set(key, count);
+        return count <= limit;
+    }
+
+    func retry_after_seconds_at(self: web_server.RequestRateLimiter, cfg: collections.Map<String, String>, cfg_base: String) -> Int {
+        let util = new web_server.ServerUtil();
+        let window_ms = util.cfg_int_at(cfg, cfg_base, "limit_req_window_ms", 0);
+        if window_ms <= 0 {
+            return 1;
+        }
+        let sec = window_ms / 1000;
+        if sec < 1 {
+            return 1;
+        }
+        return sec;
     }
 }
 
@@ -238,6 +398,10 @@ class ListenerRegistry {
         _ = listener.set(base + ".error_log_level", util.cfg_get(src, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
         _ = listener.set(base + ".gzip", util.cfg_get(src, "gzip", DEFAULT_GZIP));
         _ = listener.set(base + ".gzip_min_length", util.cfg_get(src, "gzip_min_length", DEFAULT_GZIP_MIN_LENGTH_TEXT));
+        _ = listener.set(base + ".limit_req_key", util.cfg_get(src, "limit_req_key", DEFAULT_LIMIT_REQ_KEY));
+        _ = listener.set(base + ".limit_req_count", util.cfg_get(src, "limit_req_count", DEFAULT_LIMIT_REQ_COUNT_TEXT));
+        _ = listener.set(base + ".limit_req_window_ms", util.cfg_get(src, "limit_req_window_ms", DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT));
+        _ = listener.set(base + ".limit_req_rate", util.cfg_get(src, "limit_req_rate", DEFAULT_LIMIT_REQ_RATE));
         if idx == 0 {
             _ = listener.set("server_name", util.cfg_get(src, "server_name", DEFAULT_SERVER_NAME));
             _ = listener.set("server_name_count", util.cfg_get(src, "server_name_count", "0"));
@@ -255,6 +419,10 @@ class ListenerRegistry {
             _ = listener.set("error_log_level", util.cfg_get(src, "error_log_level", DEFAULT_ERROR_LOG_LEVEL));
             _ = listener.set("gzip", util.cfg_get(src, "gzip", DEFAULT_GZIP));
             _ = listener.set("gzip_min_length", util.cfg_get(src, "gzip_min_length", DEFAULT_GZIP_MIN_LENGTH_TEXT));
+            _ = listener.set("limit_req_key", util.cfg_get(src, "limit_req_key", DEFAULT_LIMIT_REQ_KEY));
+            _ = listener.set("limit_req_count", util.cfg_get(src, "limit_req_count", DEFAULT_LIMIT_REQ_COUNT_TEXT));
+            _ = listener.set("limit_req_window_ms", util.cfg_get(src, "limit_req_window_ms", DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT));
+            _ = listener.set("limit_req_rate", util.cfg_get(src, "limit_req_rate", DEFAULT_LIMIT_REQ_RATE));
         }
         let loc_count = util.cfg_int(src, "loc_count", 0);
         _ = listener.set(base + ".loc_count", util.itoa(loc_count));
@@ -542,6 +710,10 @@ class MapCloner {
         self.copy_if_present(src, out, util.cfg_key_at(base, "error_log_level"));
         self.copy_if_present(src, out, util.cfg_key_at(base, "gzip"));
         self.copy_if_present(src, out, util.cfg_key_at(base, "gzip_min_length"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "limit_req_key"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "limit_req_count"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "limit_req_window_ms"));
+        self.copy_if_present(src, out, util.cfg_key_at(base, "limit_req_rate"));
         self.copy_locations(src, out, base);
         self.copy_rewrites(src, out, base);
     }
@@ -686,11 +858,11 @@ class ListenerPlan {
                 _ = self.registry.merge_vhosts(existing_listener, listener);
                 _ = self.store_listener_in(compact_store, existing, existing_listener);
                 self.shared_vhosts += 1;
-            } else {
-                _ = self.store_listener_in(compact_store, compact_count, listener);
-                _ = compact_index.set(bind_key, compact_count);
-                compact_count += 1;
+                skip;
             }
+            _ = self.store_listener_in(compact_store, compact_count, listener);
+            _ = compact_index.set(bind_key, compact_count);
+            compact_count += 1;
         }
         self.listener_store = compact_store;
         self.listener_index = compact_index;
@@ -757,12 +929,16 @@ class VirtualHostRouter {
 
     // Determines whether this HTTP request should be redirected to HTTPS.
     func should_redirect_https(self: web_server.VirtualHostRouter, req: web_server.HttpRequest) -> Bool {
+        let util = new web_server.ServerUtil();
+        let redirect_names = util.cfg_get(self.listener, "https_redirect_names", "|");
+        if redirect_names == "|" {
+            return false;
+        }
         let host = req.host();
         if len(host) == 0 {
             return false;
         }
-        let util = new web_server.ServerUtil();
-        return strings.contains(util.cfg_get(self.listener, "https_redirect_names", "|"), "|" + host + "|");
+        return strings.contains(redirect_names, "|" + host + "|");
     }
 
     // Builds the HTTPS redirect URL.
@@ -772,6 +948,11 @@ class VirtualHostRouter {
 
     // Selects the config base for the request Host or TLS SNI.
     func select_base(self: web_server.VirtualHostRouter, req: web_server.HttpRequest, sni: String) -> String {
+        let util = new web_server.ServerUtil();
+        let vhost_count = util.cfg_int(self.listener, "vhost_count", 0);
+        if vhost_count == 1 {
+            return (new web_server.ListenerRegistry()).vhost_key(0, "");
+        }
         return (new web_server.VirtualHostSelector(self.listener)).select_vhost_base(req, sni);
     }
 }
@@ -893,19 +1074,21 @@ class RequestDispatcher {
     // Source file selected for the sendfile fast path.
     var sendfile_source_handle: Int;
     var sendfile_body_size: Int;
+    var sendfile_disk: String;
 
     func init(self: web_server.RequestDispatcher) -> Void {
         self.keep_alive = false;
         self.cfg_base = "";
         self.sendfile_source_handle = 0;
         self.sendfile_body_size = 0;
+        self.sendfile_disk = "";
     }
 
     func deinit(self: web_server.RequestDispatcher) -> Void {
     }
 
     // Dispatches one parsed request against the listener map.
-    async func dispatch(self: web_server.RequestDispatcher, listener: collections.Map<String, String>, conn: web_server.ClientConnection, req: web_server.HttpRequest, allow_keep_alive: Bool = true) -> String {
+    async func dispatch(self: web_server.RequestDispatcher, listener: collections.Map<String, String>, limiter: web_server.RequestRateLimiter, conn: web_server.ClientConnection, req: web_server.HttpRequest, allow_keep_alive: Bool = true) -> String {
         let util = new web_server.ServerUtil();
         let keys = new web_server.ConfigKeys();
         let router = new web_server.VirtualHostRouter(listener);
@@ -913,10 +1096,7 @@ class RequestDispatcher {
         self.cfg_base = "";
         self.sendfile_source_handle = 0;
         self.sendfile_body_size = 0;
-        if !conn.is_tls && router.should_redirect_https(req) {
-            let ctx = new web_server.RequestContext(0, req, req.path(), false, conn);
-            return await web_server.RequestHandler<web_server.RedirectRequestHandler>.handle_request(new web_server.RedirectRequestHandler(router.redirect_url(req)), listener, "", ctx);
-        }
+        self.sendfile_disk = "";
         let cfg_base = router.select_base(req, conn.sni);
         self.cfg_base = cfg_base;
         self.keep_alive = req.keep_alive();
@@ -925,6 +1105,15 @@ class RequestDispatcher {
         }
         if conn.timeout_ms <= 0 {
             self.keep_alive = false;
+        }
+        if !limiter.allow_at(listener, cfg_base, conn) {
+            self.keep_alive = false;
+            let retry_after = limiter.retry_after_seconds_at(listener, cfg_base);
+            return (new web_server.HttpResponseFactory()).response_extra(429, "text/plain; charset=utf-8", "Too Many Requests", false, "\r\nRetry-After: " + util.itoa(retry_after));
+        }
+        if !conn.is_tls && router.should_redirect_https(req) {
+            let ctx = new web_server.RequestContext(0, req, req.path(), false, conn);
+            return await web_server.RequestHandler<web_server.RedirectRequestHandler>.handle_request(new web_server.RedirectRequestHandler(router.redirect_url(req)), listener, cfg_base, ctx);
         }
         let dsl = new web_server.ConfigDsl();
         let path = dsl.apply_rewrites_at(listener, cfg_base, req.path());
@@ -951,6 +1140,10 @@ class RequestDispatcher {
                 if sendfile_plan.source_handle > 0 {
                     self.sendfile_source_handle = sendfile_plan.source_handle;
                     self.sendfile_body_size = sendfile_plan.body_size;
+                    self.sendfile_disk = sendfile_plan.disk;
+                    if sendfile_plan.body_size > SENDFILE_STREAM_THRESHOLD_BYTES {
+                        self.keep_alive = false;
+                    }
                     return sendfile_plan.header;
                 }
             }
@@ -1015,6 +1208,10 @@ class VirtualHostSelector {
         _ = out.set("access_log_format", util.cfg_get(self.listener, base + ".access_log_format", util.cfg_get(self.listener, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT)));
         _ = out.set("error_log", util.cfg_get(self.listener, base + ".error_log", util.cfg_get(self.listener, "error_log", DEFAULT_ERROR_LOG)));
         _ = out.set("error_log_level", util.cfg_get(self.listener, base + ".error_log_level", util.cfg_get(self.listener, "error_log_level", DEFAULT_ERROR_LOG_LEVEL)));
+        _ = out.set("limit_req_key", util.cfg_get(self.listener, base + ".limit_req_key", util.cfg_get(self.listener, "limit_req_key", DEFAULT_LIMIT_REQ_KEY)));
+        _ = out.set("limit_req_count", util.cfg_get(self.listener, base + ".limit_req_count", util.cfg_get(self.listener, "limit_req_count", DEFAULT_LIMIT_REQ_COUNT_TEXT)));
+        _ = out.set("limit_req_window_ms", util.cfg_get(self.listener, base + ".limit_req_window_ms", util.cfg_get(self.listener, "limit_req_window_ms", DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT)));
+        _ = out.set("limit_req_rate", util.cfg_get(self.listener, base + ".limit_req_rate", util.cfg_get(self.listener, "limit_req_rate", DEFAULT_LIMIT_REQ_RATE)));
         (new web_server.ListenerRegistry()).copy_log_formats(self.listener, out);
         _ = out.set("listen_host", util.cfg_get(self.listener, "listen_host", DEFAULT_LISTEN_HOST));
         _ = out.set("listen_port", util.cfg_get(self.listener, "listen_port", DEFAULT_LISTEN_PORT_TEXT));
@@ -1103,11 +1300,12 @@ class ClientRequestTask {
 
     // Handles a client connection, including repeated requests on keep-alive.
     // Every valid request goes through RequestDispatcher.
-    async func handle(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, is_tls: Bool, cfd: Int) -> Int {
+    async func handle(self: web_server.ClientRequestTask, listener: collections.Map<String, String>, limiter: web_server.RequestRateLimiter, is_tls: Bool, cfd: Int, worker_load_hint: Int) -> Int {
         let util = new web_server.ServerUtil();
         let max_body = util.cfg_int(listener, "client_max_body_size", DEFAULT_CLIENT_MAX_BODY_SIZE);
         let timeout_ms = util.cfg_int(listener, "keepalive_timeout_ms", DEFAULT_KEEPALIVE_TIMEOUT_MS);
         let conn = new web_server.ClientConnection(cfd, is_tls, timeout_ms);
+        conn.worker_load_hint = worker_load_hint;
         let factory = new web_server.HttpResponseFactory();
         let dispatcher = new web_server.RequestDispatcher();
         let logger = new web_server.WebLogger();
@@ -1118,34 +1316,66 @@ class ClientRequestTask {
             let req = await conn.recv_request(max_body);
             if len(req) == 0 {
                 open = false;
-            } else if strings.find_substr(req, "\r\n\r\n") < 0 {
+                skip;
+            }
+            if strings.find_substr(req, "\r\n\r\n") < 0 {
                 let bad_response = factory.response_conn(400, "text/plain", "Bad Request", false);
                 _ = await conn.send(bad_response);
                 logger.write_error(listener, "info", "client sent an invalid HTTP request");
                 open = false;
-            } else if len(req) >= max_body {
+                skip;
+            }
+            if len(req) >= max_body {
                 let large_response = factory.response_conn(413, "text/plain", "Payload Too Large", false);
                 _ = await conn.send(large_response);
                 logger.write_error(listener, "warn", "client request body is larger than client_max_body_size");
                 open = false;
+                skip;
+            }
+            let request = new web_server.HttpRequest(req);
+            let response = await dispatcher.dispatch(listener, limiter, conn, request, handled + 1 < keepalive_limit);
+            let response_cfg_base = dispatcher.cfg_base;
+            let response_keep_alive = dispatcher.keep_alive;
+            let response_sendfile_source_handle = dispatcher.sendfile_source_handle;
+            let response_sendfile_body_size = dispatcher.sendfile_body_size;
+            let logged_body_bytes = logger.response_body_bytes(response);
+            if response_sendfile_source_handle > 0 {
+                logged_body_bytes = util.itoa(response_sendfile_body_size);
+            }
+            logger.write_access_meta_at(listener, response_cfg_base, conn, request, response, logger.response_status(response), logged_body_bytes);
+            if response_sendfile_source_handle > 0 {
+                let response_body_bytes = await conn.sendfile_response(response, response_sendfile_source_handle, response_sendfile_body_size, dispatcher.sendfile_disk, !response_keep_alive);
+                if response_body_bytes < response_sendfile_body_size {
+                    logger.write_error(listener, "warn", "file response closed before full body was sent stage=" + conn.file_send_stage + " sent=" + util.itoa(conn.file_send_bytes) + " expected=" + util.itoa(conn.file_send_expected) + " detail=" + conn.file_send_error + " aio_os=" + util.itoa(aio.last_os_error()));
+                }
             } else {
-                let request = new web_server.HttpRequest(req);
-                let response = await dispatcher.dispatch(listener, conn, request, handled + 1 < keepalive_limit);
-                if dispatcher.sendfile_source_handle > 0 {
-                    _ = await conn.sendfile_and_close(response, dispatcher.sendfile_source_handle, dispatcher.sendfile_body_size);
-                } else {
-                    _ = await conn.send(response);
-                }
-                logger.write_access_meta_at(listener, dispatcher.cfg_base, conn, request, response, logger.response_status(response), logger.response_body_bytes(response));
-                handled += 1;
-                if dispatcher.sendfile_source_handle > 0 || !dispatcher.keep_alive {
-                    open = false;
-                }
+                _ = await conn.send(response);
+            }
+            handled += 1;
+            if conn.fd < 0 || !response_keep_alive {
+                open = false;
             }
         }
         _ = conn.close();
         logger.close();
         return handled;
+    }
+}
+
+// Owns one spawned client Future in a regular object field. Keeping Future
+// values out of Vector<Any> avoids erasing async frame pointers through Any in
+// the hot worker window.
+class ClientTaskSlot {
+    var fut: Future(Int);
+    var active: Bool;
+
+    func init(self: web_server.ClientTaskSlot, fut: Future(Int)) -> Void {
+        self.fut = fut;
+        self.active = true;
+    }
+
+    func deactivate(self: web_server.ClientTaskSlot) -> Void {
+        self.active = false;
     }
 }
 
@@ -1262,22 +1492,32 @@ class ServerListener {
     // Reaps completed client tasks without blocking on active connections.
     // Completed entries are removed by swapping in the last pending future so
     // the vector stays compact without preserving request ordering.
-    async func join_ready_client_tasks(self: web_server.ServerListener, tasks: collections.Vector<Future(Int)>) -> Int {
+    async func join_ready_client_tasks(self: web_server.ServerListener, tasks: collections.Vector<web_server.ClientTaskSlot>) -> Int {
         let total = 0;
         let i = 0;
         loop i < tasks.len() {
-            let current = tasks.get_unchecked(i);
-            if runtime.future_is_ready_int(current) {
-                let handled = join current;
-                total += handled;
-                let last = tasks.len() - 1;
-                if i < last {
-                    _ = tasks.set(i, tasks.get_unchecked(last));
+            let slot = tasks.get_unchecked(i);
+            if !slot.active {
+                let last_empty = tasks.len() - 1;
+                if i < last_empty {
+                    _ = tasks.set(i, tasks.get_unchecked(last_empty));
                 }
-                _ = tasks.pop_back(current);
-            } else {
-                i += 1;
+                _ = tasks.pop_back(slot);
+                skip;
             }
+            let current = slot.fut;
+            if !runtime.future_is_ready_int(current) {
+                i += 1;
+                skip;
+            }
+            let handled = join current;
+            total += handled;
+            _ = slot.deactivate();
+            let last = tasks.len() - 1;
+            if i < last {
+                _ = tasks.set(i, tasks.get_unchecked(last));
+            }
+            _ = tasks.pop_back(slot);
         }
         return total;
     }
@@ -1286,7 +1526,7 @@ class ServerListener {
     // worker_connections. The loop polls all client futures and uses a short
     // async file-watch timeout as a scheduler tick, so it resumes when any
     // connection finishes instead of blocking on a specific pending future.
-    async func wait_for_client_capacity(self: web_server.ServerListener, tasks: collections.Vector<Future(Int)>) -> Int {
+    async func wait_for_client_capacity(self: web_server.ServerListener, tasks: collections.Vector<web_server.ClientTaskSlot>) -> Int {
         let total = 0;
         loop total == 0 && tasks.len() > 0 {
             let ready_handled = await self.join_ready_client_tasks(tasks);
@@ -1299,11 +1539,17 @@ class ServerListener {
     }
 
     // Joins every remaining client task during listener shutdown.
-    async func join_all_client_tasks(self: web_server.ServerListener, tasks: collections.Vector<Future(Int)>) -> Int {
+    async func join_all_client_tasks(self: web_server.ServerListener, tasks: collections.Vector<web_server.ClientTaskSlot>) -> Int {
         let total = 0;
         loop (let i = 0; i < tasks.len(); i += 1) {
-            let handled = join tasks.get_unchecked(i);
+            let slot = tasks.get_unchecked(i);
+            if !slot.active {
+                skip;
+            }
+            let current = slot.fut;
+            let handled = join current;
             total += handled;
+            _ = slot.deactivate();
         }
         tasks.clear();
         return total;
@@ -1319,10 +1565,11 @@ class ServerListener {
         let serving = true;
         let accept_timeout_ms = DEFAULT_ACCEPT_TIMEOUT_MS;
         let max_concurrent_connections = util.cfg_int(self.listener, "worker_connections", DEFAULT_WORKER_CONNECTIONS);
+        let limiter = new web_server.RequestRateLimiter();
         if max_concurrent_connections < 1 {
             max_concurrent_connections = 1;
         }
-        let client_tasks = new collections.Vector<Future(Int)>();
+        let client_tasks = new collections.Vector<web_server.ClientTaskSlot>();
         if self.is_tls {
             accept_timeout_ms = util.cfg_int(self.listener, "ssl_handshake_timeout_ms", DEFAULT_KEEPALIVE_TIMEOUT_MS);
             if accept_timeout_ms < DEFAULT_ACCEPT_TIMEOUT_MS {
@@ -1338,8 +1585,9 @@ class ServerListener {
             }
             let cfd, _ = await self.accept(accept_timeout_ms);
             if cfd > 0 {
-                let client_listener = (new web_server.MapCloner()).clone(self.listener);
-                _ = client_tasks.push(spawn (new web_server.ClientRequestTask()).handle(client_listener, self.is_tls, cfd));
+                let worker_load_hint = client_tasks.len() + 1;
+                let client_future = spawn (new web_server.ClientRequestTask()).handle(self.listener, limiter, self.is_tls, cfd, worker_load_hint);
+                _ = client_tasks.push(new web_server.ClientTaskSlot(client_future));
                 accepted += 1;
             }
             if max_requests > 0 && accepted >= max_requests {
@@ -1363,6 +1611,10 @@ class ServerListener {
         }
         self.is_tls = util.cfg_get(self.listener, "__is_tls", "0") == "1";
         _ = await (new web_server.StaticFileServer()).preload_listener_exact_static_locations(self.listener);
+        // The listener map is shared by all client tasks in this worker. Pin the
+        // native string map so async task scheduling cannot finalize its handle
+        // while keep-alive requests are still reading routing fields.
+        self.listener.pin();
         let rc = await self.worker_loop(max_requests);
         if self.is_tls {
             print("egret-web-server: tls_session_stats " + aio.tls.session_stats(self.listen_fd));
@@ -1519,37 +1771,39 @@ class WebServerApplication {
                 if wait_err != OK {
                     rc = 1;
                     running = false;
-                } else {
-                    let slot = self.find_worker_slot(pids, exited_pid);
-                    if slot < 0 {
-                        print("egret-web-server: unknown child " + (new web_server.ServerUtil()).itoa(exited_pid) + " exited with status " + (new web_server.ServerUtil()).itoa(st));
-                    } else if self.max_requests > 0 {
-                        _ = pids.set(slot, 0);
-                        if st != 0 {
-                            rc = st;
-                        }
-                        let remaining = 0;
-                        loop (let pi = 0; pi < pids.len(); pi += 1) {
-                            if pids.get_unchecked(pi) > 0 {
-                                remaining += 1;
-                            }
-                        }
-                        if remaining == 0 {
-                            running = false;
-                        }
-                    } else {
-                        if st != 0 {
-                            print("egret-web-server: worker slot " + (new web_server.ServerUtil()).itoa(slot) + " exited with status " + (new web_server.ServerUtil()).itoa(st) + "; respawning");
-                        }
-                        let next_pid, next_err = await self.fork_worker_slot(slot);
-                        if next_err != OK {
-                            rc = 1;
-                            running = false;
-                        } else {
-                            _ = pids.set(slot, next_pid);
+                    skip;
+                }
+                let slot = self.find_worker_slot(pids, exited_pid);
+                if slot < 0 {
+                    print("egret-web-server: unknown child " + (new web_server.ServerUtil()).itoa(exited_pid) + " exited with status " + (new web_server.ServerUtil()).itoa(st));
+                    skip;
+                }
+                if self.max_requests > 0 {
+                    _ = pids.set(slot, 0);
+                    if st != 0 {
+                        rc = st;
+                    }
+                    let remaining = 0;
+                    loop (let pi = 0; pi < pids.len(); pi += 1) {
+                        if pids.get_unchecked(pi) > 0 {
+                            remaining += 1;
                         }
                     }
+                    if remaining == 0 {
+                        running = false;
+                    }
+                    skip;
                 }
+                if st != 0 {
+                    print("egret-web-server: worker slot " + (new web_server.ServerUtil()).itoa(slot) + " exited with status " + (new web_server.ServerUtil()).itoa(st) + "; respawning");
+                }
+                let next_pid, next_err = await self.fork_worker_slot(slot);
+                if next_err != OK {
+                    rc = 1;
+                    running = false;
+                    skip;
+                }
+                _ = pids.set(slot, next_pid);
             }
             _ = self.close_listeners();
             _ = aio.fs.shutdown();
