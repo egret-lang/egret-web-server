@@ -68,6 +68,7 @@ class ClientConnection {
     var file_send_bytes: Int;
     var file_send_expected: Int;
     var worker_load_hint: Int;
+    var request_start_ms: Int;
 
     func init(self: web_server.ClientConnection, fd: Int, is_tls: Bool, timeout_ms: Int) -> Void {
         self.fd = fd;
@@ -79,6 +80,7 @@ class ClientConnection {
         self.file_send_bytes = 0;
         self.file_send_expected = 0;
         self.worker_load_hint = 0;
+        self.request_start_ms = 0;
         self.sni = "";
         self.remote_addr = "";
         if is_tls {
@@ -94,7 +96,9 @@ class ClientConnection {
 
     // Receives one complete request from the client.
     async func recv_request(self: web_server.ClientConnection, max_total: Int) -> String {
-        return await self.transport.recv_request(max_total);
+        let req = await self.transport.recv_request(max_total);
+        self.request_start_ms = self.transport.last_request_start_ms;
+        return req;
     }
 
     // Sends one complete response to the client.
@@ -1333,24 +1337,34 @@ class ClientRequestTask {
                 skip;
             }
             let request = new web_server.HttpRequest(req);
+            if conn.request_start_ms <= 0 {
+                conn.request_start_ms = time.now_ms();
+            }
             let response = await dispatcher.dispatch(listener, limiter, conn, request, handled + 1 < keepalive_limit);
             let response_cfg_base = dispatcher.cfg_base;
             let response_keep_alive = dispatcher.keep_alive;
             let response_sendfile_source_handle = dispatcher.sendfile_source_handle;
             let response_sendfile_body_size = dispatcher.sendfile_body_size;
+            let response_status = logger.response_status(response);
             let logged_body_bytes = logger.response_body_bytes(response);
             if response_sendfile_source_handle > 0 {
                 logged_body_bytes = util.itoa(response_sendfile_body_size);
             }
-            logger.write_access_meta_at(listener, response_cfg_base, conn, request, response, logger.response_status(response), logged_body_bytes);
             if response_sendfile_source_handle > 0 {
                 let response_body_bytes = await conn.sendfile_response(response, response_sendfile_source_handle, response_sendfile_body_size, dispatcher.sendfile_disk, !response_keep_alive);
+                logged_body_bytes = util.itoa(response_body_bytes);
                 if response_body_bytes < response_sendfile_body_size {
                     logger.write_error(listener, "warn", "file response closed before full body was sent stage=" + conn.file_send_stage + " sent=" + util.itoa(conn.file_send_bytes) + " expected=" + util.itoa(conn.file_send_expected) + " detail=" + conn.file_send_error + " aio_os=" + util.itoa(aio.last_os_error()));
                 }
             } else {
                 _ = await conn.send(response);
             }
+            let request_end_ms = time.now_ms();
+            let request_time_ms = request_end_ms - conn.request_start_ms;
+            if request_time_ms < 0 {
+                request_time_ms = 0;
+            }
+            logger.write_access_meta_at(listener, response_cfg_base, conn, request, response, response_status, logged_body_bytes, util.itoa(request_time_ms));
             handled += 1;
             if conn.fd < 0 || !response_keep_alive {
                 open = false;

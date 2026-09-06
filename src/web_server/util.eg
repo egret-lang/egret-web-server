@@ -204,7 +204,67 @@ class ServerUtil {
         return out;
     }
 
+    // Extracts an anchored literal prefix from simple regex locations such as
+    // "^/api/". The parser stops before any regex metacharacter and only
+    // accepts patterns without a terminal "$", because terminal anchors need a
+    // full-string check rather than prefix semantics.
+    func simple_regex_prefix(self: web_server.ServerUtil, pattern: String) -> String {
+        if len(pattern) <= 1 || substr(pattern, 0, 1) != "^" {
+            return "";
+        }
+        if substr(pattern, len(pattern) - 1, 1) == "$" {
+            return "";
+        }
+        let out = "";
+        let escaped = false;
+        loop (let i = 1; i < len(pattern); i += 1) {
+            let ch = substr(pattern, i, 1);
+            if escaped {
+                out += ch;
+                escaped = false;
+            } else if ch == "\\" {
+                escaped = true;
+            } else if ch == "." || ch == "*" || ch == "+" || ch == "?" || ch == "[" || ch == "]" || ch == "(" || ch == ")" || ch == "|" || ch == "{" || ch == "}" || ch == "$" {
+                break;
+            } else {
+                out += ch;
+            }
+        }
+        if escaped {
+            return "";
+        }
+        return out;
+    }
+
+    func is_alnum_ascii(self: web_server.ServerUtil, ch: String) -> Bool {
+        return strings.contains("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", ch);
+    }
+
+    // Supports the short-link route used by production config:
+    // "^/[A-Za-z0-9]{5,32}$".
+    func match_alnum_path_range(self: web_server.ServerUtil, pattern: String, path: String) -> Bool {
+        if pattern != "^/[A-Za-z0-9]{5,32}$" {
+            return false;
+        }
+        if len(path) < 6 || len(path) > 33 || substr(path, 0, 1) != "/" {
+            return false;
+        }
+        loop (let i = 1; i < len(path); i += 1) {
+            if !self.is_alnum_ascii(substr(path, i, 1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     func match_regex_loc(self: web_server.ServerUtil, pattern: String, path: String) -> Bool {
+        if self.match_alnum_path_range(pattern, path) {
+            return true;
+        }
+        let prefix = self.simple_regex_prefix(pattern);
+        if len(prefix) > 0 {
+            return self.starts_with(path, prefix);
+        }
         let suffix = self.simple_regex_suffix(pattern);
         if len(suffix) > 0 {
             return strings.ends_with(path, suffix);

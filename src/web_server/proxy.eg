@@ -79,6 +79,9 @@ class ReverseProxy {
         if len(resp) == 0 {
             return factory.response_conn(502, "text/plain", "Bad Gateway", keep_alive);
         }
+        if len(resp) < 5 || substr(resp, 0, 5) != "HTTP/" {
+            return factory.response_conn(502, "text/plain", "Bad Gateway", keep_alive);
+        }
         return resp;
     }
 

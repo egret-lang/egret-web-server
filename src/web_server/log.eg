@@ -376,8 +376,12 @@ class WebLogger {
 
     // Extracts the three-digit status from a generated HTTP/1.1 response.
     func response_status(self: web_server.WebLogger, resp: String) -> String {
-        if len(resp) >= 12 && substr(resp, 0, 9) == "HTTP/1.1 " {
-            return substr(resp, 9, 3);
+        let first = self.first_line(resp);
+        if len(first) >= 12 && substr(first, 0, 5) == "HTTP/" {
+            let p = strings.find_substr(first, " ");
+            if p >= 0 && p + 4 <= len(first) {
+                return substr(first, p + 1, 3);
+            }
         }
         return "000";
     }
@@ -416,13 +420,14 @@ class WebLogger {
     // Expands the supported nginx-style log_format variables into one access
     // log line. Unknown variables remain untouched so future variables do not
     // break older binaries.
-    func format_line(self: web_server.WebLogger, format: String, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String) -> String {
+    func format_line(self: web_server.WebLogger, format: String, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String, request_time_ms: String) -> String {
         let util = new web_server.ServerUtil();
         let time_local = self.access_log_time();
         let out = format;
         out = strings.replace_all(out, "$remote_addr", self.remote_addr(conn));
         out = strings.replace_all(out, "$remote_user", "-");
         out = strings.replace_all(out, "$time_local", time_local);
+        out = strings.replace_all(out, "$request_time", request_time_ms);
         out = strings.replace_all(out, "$request", self.first_line(req.raw));
         out = strings.replace_all(out, "$status", self.response_status(resp));
         out = strings.replace_all(out, "$body_bytes_sent", self.response_body_bytes(resp));
@@ -442,7 +447,7 @@ class WebLogger {
     // Fast path for the default "main" log_format. It avoids the generic
     // replace-all pipeline and uses status/body values already derived by the
     // caller from the generated response.
-    func format_main_line(self: web_server.WebLogger, conn: web_server.ClientConnection, req: web_server.HttpRequest, status: String, body_bytes: String) -> String {
+    func format_main_line(self: web_server.WebLogger, conn: web_server.ClientConnection, req: web_server.HttpRequest, status: String, body_bytes: String, request_time_ms: String) -> String {
         return self.remote_addr(conn)
         + " - - ["
         + self.access_log_time()
@@ -464,19 +469,19 @@ class WebLogger {
     // Selects the matching virtual host, resolves access_log and log_format
     // inheritance, formats the request/response pair, and appends the line.
     func write_access(self: web_server.WebLogger, listener: collections.Map<String, String>, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String) -> Void {
-        self.write_access_meta(listener, conn, req, resp, self.response_status(resp), self.response_body_bytes(resp));
+        self.write_access_meta(listener, conn, req, resp, self.response_status(resp), self.response_body_bytes(resp), "0");
     }
 
     // Same as write_access(), but accepts response metadata that hot paths may
     // already have, avoiding repeated scans of the serialized response buffer.
-    func write_access_meta(self: web_server.WebLogger, listener: collections.Map<String, String>, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String, status: String, body_bytes: String) -> Void {
+    func write_access_meta(self: web_server.WebLogger, listener: collections.Map<String, String>, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String, status: String, body_bytes: String, request_time_ms: String) -> Void {
         let base = (new web_server.VirtualHostRouter(listener)).select_base(req, conn.sni);
-        self.write_access_meta_at(listener, base, conn, req, resp, status, body_bytes);
+        self.write_access_meta_at(listener, base, conn, req, resp, status, body_bytes, request_time_ms);
     }
 
     // Writes access logs when the caller already knows the selected config
     // base. This is the hot path used by request dispatch.
-    func write_access_meta_at(self: web_server.WebLogger, listener: collections.Map<String, String>, base: String, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String, status: String, body_bytes: String) -> Void {
+    func write_access_meta_at(self: web_server.WebLogger, listener: collections.Map<String, String>, base: String, conn: web_server.ClientConnection, req: web_server.HttpRequest, resp: String, status: String, body_bytes: String, request_time_ms: String) -> Void {
         let util = new web_server.ServerUtil();
         let path = util.cfg_get_at(listener, base, "access_log", util.cfg_get(listener, "access_log", DEFAULT_ACCESS_LOG));
         if len(path) == 0 || path == DISABLED_TEXT {
@@ -485,9 +490,9 @@ class WebLogger {
         let format_name = util.cfg_get_at(listener, base, "access_log_format", util.cfg_get(listener, "access_log_format", DEFAULT_ACCESS_LOG_FORMAT));
         let format = util.cfg_get(listener, "log_format." + format_name, util.cfg_get(listener, "log_format.main", DEFAULT_LOG_FORMAT_MAIN));
         if format == DEFAULT_LOG_FORMAT_MAIN {
-            self.append_line(path, self.format_main_line(conn, req, status, body_bytes));
+            self.append_line(path, self.format_main_line(conn, req, status, body_bytes, request_time_ms));
         } else {
-            self.append_line(path, self.format_line(format, conn, req, resp));
+            self.append_line(path, self.format_line(format, conn, req, resp, request_time_ms));
         }
     }
 }

@@ -8,6 +8,7 @@ use aio.tls;
 use strconv;
 use strings;
 use std;
+use time;
 
 // In-memory HTTP response representation. Rendering is kept here so all
 // handlers emit a consistent status line, content headers, and connection mode.
@@ -213,21 +214,28 @@ class HttpTransport {
     var is_tls: Bool;
     // Per-operation timeout in milliseconds.
     var timeout_ms: Int;
+    // Timestamp captured when the first byte of the most recent request arrived.
+    var last_request_start_ms: Int;
 
     func init(self: web_server.HttpTransport, fd: Int, is_tls: Bool = false, timeout_ms: Int = DEFAULT_KEEPALIVE_TIMEOUT_MS) -> Void {
         self.fd = fd;
         self.is_tls = is_tls;
         self.timeout_ms = timeout_ms;
+        self.last_request_start_ms = 0;
     }
 
     // Receives a complete HTTP request, including fixed-length or chunked body.
     async func recv_request(self: web_server.HttpTransport, max_total: Int) -> String {
         if self.is_tls {
             let tls_stream = new web_server.HttpConnStream<web_server.TlsHttpConn>(new web_server.TlsHttpConn(self.fd));
-            return await tls_stream.recv_request(max_total, self.timeout_ms);
+            let req = await tls_stream.recv_request(max_total, self.timeout_ms);
+            self.last_request_start_ms = tls_stream.first_recv_ms;
+            return req;
         }
         let tcp_stream = new web_server.HttpConnStream<web_server.TcpHttpConn>(new web_server.TcpHttpConn(self.fd));
-        return await tcp_stream.recv_request(max_total, self.timeout_ms);
+        let req = await tcp_stream.recv_request(max_total, self.timeout_ms);
+        self.last_request_start_ms = tcp_stream.first_recv_ms;
+        return req;
     }
 
     // Sends the complete response or proxied request.
@@ -536,9 +544,18 @@ class HttpRequestParser {
 class HttpConnStream<T: web_server.HttpConn> {
     // Underlying TCP or TLS adapter.
     var conn: T;
+    // Timestamp of the first non-empty chunk read by this stream.
+    var first_recv_ms: Int;
 
     func init(self: web_server.HttpConnStream<T>, conn: T) -> Void {
         self.conn = conn;
+        self.first_recv_ms = 0;
+    }
+
+    func note_recv_chunk(self: web_server.HttpConnStream<T>, chunk: String) -> Void {
+        if self.first_recv_ms == 0 && len(chunk) > 0 {
+            self.first_recv_ms = time.now_ms();
+        }
     }
 
     // Receives headers first, then reads either chunked body or Content-Length
@@ -562,6 +579,7 @@ class HttpConnStream<T: web_server.HttpConn> {
                 if len(chunk) == 0 {
                     return req;
                 }
+                self.note_recv_chunk(chunk);
                 req += chunk;
             }
             return req;
@@ -587,6 +605,7 @@ class HttpConnStream<T: web_server.HttpConn> {
             if len(chunk) == 0 {
                 return req;
             }
+            self.note_recv_chunk(chunk);
             req += chunk;
         }
         return req;
@@ -612,6 +631,7 @@ class HttpConnStream<T: web_server.HttpConn> {
             if len(chunk) == 0 {
                 break;
             }
+            self.note_recv_chunk(chunk);
             buf += chunk;
         }
         return buf;
