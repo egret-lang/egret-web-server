@@ -4,7 +4,7 @@
 
 ## Build & Run（Linux & MacOS）:
 
-This software must be compiled with egret-lang compiler version 0.1.3 or later.If you haven't installed egret-lang yet, please install it first:
+This software must be compiled with egret-lang compiler version 0.1.4 or later.If you haven't installed egret-lang yet, please install it first:
 ```sh
 curl -fsSL https://egret-lang.org/install.sh | sh
 ```
