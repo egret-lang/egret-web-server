@@ -62,6 +62,7 @@ internal const DEFAULT_LIMIT_REQ_KEY: String = "";
 internal const DEFAULT_LIMIT_REQ_COUNT_TEXT: String = "0";
 internal const DEFAULT_LIMIT_REQ_WINDOW_MS_TEXT: String = "0";
 internal const DEFAULT_LIMIT_REQ_RATE: String = "";
+internal const SERVER_HEADER_VALUE: String = "egret-web-server powered by egret-lang.org";
 
 // Small utility layer for config lookup, unit parsing, location matching, path
 // normalization, and MIME detection. Keeping this logic centralized prevents

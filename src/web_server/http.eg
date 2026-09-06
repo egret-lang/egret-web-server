@@ -63,7 +63,7 @@ class HttpResponse {
     // can be transferred by the kernel instead of copied into an Egret string.
     func render_head(self: web_server.HttpResponse, body_length: Int) -> String {
         return "HTTP/1.1 " + strconv.itoa(self.code) + " " + self.reason()
-        + "\r\nServer: egret-web-server\r\nContent-Type: " + self.content_type
+        + "\r\nServer: " + SERVER_HEADER_VALUE + "\r\nContent-Type: " + self.content_type
         + "\r\nContent-Length: " + strconv.itoa(body_length)
         + "\r\nStrict-Transport-Security: max-age=31536000; includeSubDomains"
         + "\r\nContent-Security-Policy: upgrade-insecure-requests; block-all-mixed-content"
@@ -287,18 +287,55 @@ class HttpResponseFactory {
     func init(self: web_server.HttpResponseFactory) -> Void {
     }
 
+    // Enforces a single public Server header for every response leaving Egret.
+    // Upstreams may return their own Server header, or more than one; strip all
+    // of them from the header block and insert Egret's identity after status.
+    func normalize_server_header(self: web_server.HttpResponseFactory, resp: String) -> String {
+        if len(resp) < 5 || substr(resp, 0, 5) != "HTTP/" {
+            return resp;
+        }
+        let header_end = strings.find_substr(resp, "\r\n\r\n");
+        if header_end < 0 {
+            return resp;
+        }
+        let headers = substr(resp, 0, header_end);
+        let rest = substr(resp, header_end, len(resp) - header_end);
+        let first_end = strings.find_substr(headers, "\r\n");
+        if first_end < 0 {
+            return resp;
+        }
+        let util = new web_server.ServerUtil();
+        let out = substr(headers, 0, first_end) + "\r\nServer: " + SERVER_HEADER_VALUE;
+        let pos = first_end + 2;
+        loop pos < len(headers) {
+            let nl = strings.find_substr_from(headers, "\r\n", pos);
+            let line = "";
+            if nl < 0 {
+                line = substr(headers, pos, len(headers) - pos);
+                pos = len(headers);
+            } else {
+                line = substr(headers, pos, nl - pos);
+                pos = nl + 2;
+            }
+            if len(line) > 0 && !util.starts_with(strings.to_lower_ascii(line), "server:") {
+                out += "\r\n" + line;
+            }
+        }
+        return out + rest;
+    }
+
     func response_conn(self: web_server.HttpResponseFactory, code: Int, content_type: String, body: String, keep_alive: Bool) -> String {
         return self.response_extra(code, content_type, body, keep_alive, "");
     }
 
     func response_extra(self: web_server.HttpResponseFactory, code: Int, content_type: String, body: String, keep_alive: Bool, extra_headers: String) -> String {
         let resp = new web_server.HttpResponse(code, content_type, body, keep_alive, extra_headers);
-        return resp.render();
+        return self.normalize_server_header(resp.render());
     }
 
     func response_head_extra(self: web_server.HttpResponseFactory, code: Int, content_type: String, body_length: Int, keep_alive: Bool, extra_headers: String) -> String {
         let resp = new web_server.HttpResponse(code, content_type, "", keep_alive, extra_headers);
-        return resp.render_head(body_length);
+        return self.normalize_server_header(resp.render_head(body_length));
     }
 
     func redirect_response(self: web_server.HttpResponseFactory, location: String, keep_alive: Bool) -> String {

@@ -103,7 +103,8 @@ class ClientConnection {
 
     // Sends one complete response to the client.
     async func send(self: web_server.ClientConnection, data: String) -> Int {
-        return await self.transport.send_all(data);
+        let response = (new web_server.HttpResponseFactory()).normalize_server_header(data);
+        return await self.transport.send_all(response);
     }
 
     // Sends a plain HTTP response with AIO-backed kernel sendfile. The source
@@ -114,15 +115,16 @@ class ClientConnection {
         self.file_send_error = "";
         self.file_send_bytes = 0;
         self.file_send_expected = body_size;
+        let response_header = (new web_server.HttpResponseFactory()).normalize_server_header(header);
         if self.is_tls || self.fd < 0 || source_handle <= 0 || body_size < 0 {
             if source_handle > 0 {
                 _ = fs.close(source_handle);
             }
-            _ = await self.send(header);
+            _ = await self.send(response_header);
             self.file_send_stage = "header-only";
             return 0;
         }
-        let header_rc = await self.send(header);
+        let header_rc = await self.send(response_header);
         if header_rc != 0 {
             _ = fs.close(source_handle);
             _ = self.close();
@@ -1340,7 +1342,8 @@ class ClientRequestTask {
             if conn.request_start_ms <= 0 {
                 conn.request_start_ms = time.now_ms();
             }
-            let response = await dispatcher.dispatch(listener, limiter, conn, request, handled + 1 < keepalive_limit);
+            let response_raw = await dispatcher.dispatch(listener, limiter, conn, request, handled + 1 < keepalive_limit);
+            let response = factory.normalize_server_header(response_raw);
             let response_cfg_base = dispatcher.cfg_base;
             let response_keep_alive = dispatcher.keep_alive;
             let response_sendfile_source_handle = dispatcher.sendfile_source_handle;
